@@ -1,9 +1,9 @@
 # 🎵 Musica Player for Android
 
-**Android + Termux で動く、高音質音楽プレイヤー**
+**Android + Termux で動く、ミドルウェアなし高音質音楽プレイヤー**
 
 > 🔒 **広告なし・データ収集なし・完全オフライン・ソースコード全公開**
-> あなたのデータは、あなたのスマホの外に出ません。
+> あなたの音楽データは、あなたのスマホの外に出ません。
 
 [![Platform](https://img.shields.io/badge/platform-Android%20%2B%20Termux-green)](https://f-droid.org/packages/com.termux/)
 [![Python](https://img.shields.io/badge/python-3.x-blue)](https://www.python.org/)
@@ -219,7 +219,7 @@ Musica Playerは**完全オフライン動作**です。
 
 ### F-Droidは安全ですか？
 
-**はい、Google Playよりむしろ透明性が高いです。**
+**はい、むしろGoogle Playより透明性が高いです。**
 
 - F-Droidは**オープンソースアプリ専門**のアプリストアです
 - すべてのアプリの**ソースコードが公開**されており、中身を誰でも確認できます
@@ -230,7 +230,7 @@ Musica Playerは**完全オフライン動作**です。
 
 ### Termuxは怪しくないですか？
 
-**怪しくありません。**
+**まったく怪しくありません。**
 
 - Termuxは世界中の開発者・研究者が日常的に使うツールです
 - 大学のコンピュータサイエンス学科でも教材として使われています
@@ -262,5 +262,4 @@ Musica Playerは**完全オフライン動作**です。
 
 ---
 
-*素晴らしい音楽ライフを！* 🎵
-
+*良い音楽ライフを！* 🎵
