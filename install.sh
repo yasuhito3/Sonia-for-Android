@@ -116,7 +116,7 @@ if [ -f "$SCRIPT_SRC" ]; then
     ok "Musica Player 本体をコピーしました"
 elif command -v curl &>/dev/null; then
     info "スクリプト本体をダウンロード中..."
-    curl -sL "https://raw.githubusercontent.com/YOUR/REPO/main/musicaplayer_android.py" \
+    curl -sL "https://raw.githubusercontent.com/yasuhito3/Sonia-for-Android/main/musicaplayer_android.py" \
          -o "$SCRIPT_DST"
     ok "Musica Player 本体をダウンロードしました"
 else
@@ -193,7 +193,7 @@ echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━
 echo ""
 echo "  【使い方】"
 echo ""
-echo -e "  1. 音楽ファイルを ${CYAN}/Music/${RESET} に入れる"
+echo -e "  1. 音楽ファイルを ${CYAN}/sdcard/Music/${RESET} に入れる"
 echo ""
 echo -e "  2. Termux で ${BOLD}musica${RESET} と入力して Enter"
 echo ""

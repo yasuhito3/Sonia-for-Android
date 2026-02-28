@@ -75,6 +75,12 @@
 bash ~/storage/downloads/install.sh
 ```
 
+または**ファイルダウンロード不要**のワンライナー：
+
+```bash
+curl -sL https://raw.githubusercontent.com/yasuhito3/Sonia-for-Android/main/install.sh | bash
+```
+
 途中でAndroidの「ストレージアクセス許可」ダイアログが出ます。**「許可」を選択**してください。
 
 **③ 完了！以後は `musica` と打つだけ：**
