@@ -1,3 +1,11 @@
 Quick start
 
+Install F Droid
+https://f-droid.org/packages/com.termux/
+
+then, install Termux and Termux:wedget
+
+then, copy-paste and enter in Termux:
 curl -sL https://raw.githubusercontent.com/yasuhito3/Sonia-for-Android/main/install.sh | bash
+
+end//
