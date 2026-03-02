@@ -20,11 +20,6 @@ cat > ~/.shortcuts/Musica << 'EOF'
 musica
 EOF
 chmod +x ~/.shortcuts/Musica
-```
-
-これを先に実行しておかないとウィジェットを配置しても何も表示されません。順番としては：
-```
-②コマンド実行 → ③ウィジェット配置
 
 
 
