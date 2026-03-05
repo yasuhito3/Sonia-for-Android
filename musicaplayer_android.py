@@ -134,23 +134,25 @@ GAIN_LABELS = {
 # ══════════════════════════════════════════════
 RADIO_STATIONS = [
     {'name':'Classic FM',          'url':'https://media-ssl.musicradio.com/ClassicFM',
-     'desc':'英国クラシック専門局', 'flag':'🇬🇧'},
+     'desc':'英国のクラシック音楽専門局', 'flag':'🇬🇧'},
     {'name':'Classic FM Calm',     'url':'https://media-ssl.musicradio.com/ClassicFMCalm',
      'desc':'リラックス系クラシック', 'flag':'🇬🇧'},
-    {'name':'WQXR',                'url':'https://stream.wqxr.org/js-wqxr',
-     'desc':'ニューヨーク・クラシック局', 'flag':'🇺🇸'},
-    {'name':'Radio Swiss Classic', 'url':'http://stream.srg-ssr.ch/rsc_de/mp3_128.m3u',
-     'desc':'スイス・クラシック', 'flag':'🇨🇭'},
-    {'name':'France Musique',      'url':'http://direct.francemusique.fr/live/francemusique-hifi.mp3',
-     'desc':'フランス国営クラシック', 'flag':'🇫🇷'},
-    {'name':'Jazz24',              'url':'https://live.wostreaming.net/direct/ppm-jazz24aac256-ibc1',
-     'desc':'ジャズ専門局', 'flag':'🇺🇸'},
-    {'name':'SomaFM Groove Salad', 'url':'https://ice2.somafm.com/groovesalad-256-mp3',
-     'desc':'チルアウト・アンビエント', 'flag':'🇺🇸'},
-    {'name':'NHK-FM',              'url':'https://nhkwlive-ojp.akamaized.net/hls/live/2003459/nhkwlive-fm-ojp/index.m3u8',
-     'desc':'NHK FM', 'flag':'🇯🇵'},
-    {'name':'KJAZZ 88.1',          'url':'https://streaming.live365.com/a49833',
-     'desc':'ロサンゼルス・ジャズ&ブルース', 'flag':'🇺🇸'},
+    {'name':'Classic FM Movies',   'url':'https://media-ssl.musicradio.com/ClassicFM-M-Movies',
+     'desc':'映画音楽専門チャンネル', 'flag':'🇬🇧'},
+    {'name':'Radio X Classic Rock','url':'https://media-ssl.musicradio.com/RadioXClassicRock',
+     'desc':'クラシックロック専門局', 'flag':'🇬🇧'},
+    {'name':'Capital FM',          'url':'https://media-ssl.musicradio.com/CapitalUK',
+     'desc':'ポップス・Top40チャート', 'flag':'🇬🇧'},
+    {'name':'Heart',               'url':'https://media-ssl.musicradio.com/HeartUK',
+     'desc':'アダルト・コンテンポラリー・ポップス', 'flag':'🇬🇧'},
+    {'name':'Capital Xtra',        'url':'https://media-ssl.musicradio.com/CapitalXTRANational',
+     'desc':'ヒップホップ・R&B専門局', 'flag':'🇬🇧'},
+    {'name':'Smooth Radio',        'url':'https://media-ssl.musicradio.com/SmoothUK',
+     'desc':'スムースR&B・ソウル', 'flag':'🇬🇧'},
+    {'name':'Jazz24',              'url':'https://knkx-live-a.edge.audiocdn.com/6285_256k',
+     'desc':'NPR系ジャズ専門局・256kbps高音質', 'flag':'🇺🇸'},
+    {'name':'KJazz 88.1 FM',       'url':'https://streaming.live365.com/a49833',
+     'desc':'ロサンゼルス・ジャズ&ブルース (1981年〜)', 'flag':'🇺🇸'},
 ]
 
 # ══════════════════════════════════════════════
@@ -672,7 +674,6 @@ input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;width:22px;heig
 
 /* ── ユーティリティ ── */
 .xubuntu-banner{{background:linear-gradient(135deg,#1a1a2e,#16213e);border:1px solid var(--ac);border-radius:12px;padding:10px 14px;font-size:12.5px;color:var(--ac2);text-align:center;margin-bottom:13px;letter-spacing:.02em}}
-.xubuntu-banner a{{color:var(--ac2);text-decoration:underline;text-underline-offset:3px}}
 .empty{{text-align:center;color:var(--tx2);padding:40px 20px;font-size:14px;line-height:1.8}}
 .loading{{text-align:center;padding:30px;color:var(--tx2)}}
 </style>
@@ -688,7 +689,7 @@ input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;width:22px;heig
 
 <!-- ── Now Playing ── -->
 <div id="pg-now" class="page active">
-  <div class="xubuntu-banner">🎶 <a href="https://sites.google.com/view/aimusicplayer-sonia/" target="_blank">Xubuntu24版へのステップアップでさらに高音質・多機能に！</a></div>
+  <div class="xubuntu-banner">🎶 Xubuntu24版へのステップアップでさらに高音質・多機能に！</div>
   <div class="np-card">
     <div class="cover-wrap">
       <div class="cover-icon" id="cover-icon">🎵</div>
@@ -732,7 +733,7 @@ input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;width:22px;heig
 
 <!-- ── Library ── -->
 <div id="pg-lib" class="page">
-  <div class="xubuntu-banner">🎶 <a href="https://sites.google.com/view/aimusicplayer-sonia/" target="_blank">Xubuntu24版へのステップアップでさらに高音質・多機能に！</a></div>
+  <div class="xubuntu-banner">🎶 Xubuntu24版へのステップアップでさらに高音質・多機能に！</div>
   <input class="srch" type="search" id="srch" placeholder="🔍 曲名・アーティスト・アルバムで検索..." oninput="filterTrks()">
   <div class="view-toggle">
     <button class="vbtn on" id="vbtn-list" onclick="setView('list')">☰ リスト</button>
@@ -745,13 +746,13 @@ input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;width:22px;heig
 
 <!-- ── Radio ── -->
 <div id="pg-radio" class="page">
-  <div class="xubuntu-banner">🎶 <a href="https://sites.google.com/view/aimusicplayer-sonia/" target="_blank">Xubuntu24版へのステップアップでさらに高音質・多機能に！</a></div>
+  <div class="xubuntu-banner">🎶 Xubuntu24版へのステップアップでさらに高音質・多機能に！</div>
   <div id="radio-list"></div>
 </div>
 
 <!-- ── Settings ── -->
 <div id="pg-set" class="page">
-  <div class="xubuntu-banner">🎶 <a href="https://sites.google.com/view/aimusicplayer-sonia/" target="_blank">Xubuntu24版へのステップアップでさらに高音質・多機能に！</a></div>
+  <div class="xubuntu-banner">🎶 Xubuntu24版へのステップアップでさらに高音質・多機能に！</div>
   <div class="sec">現在の設定をプリセット保存</div>
   <div class="pre-save">
     <input type="text" id="pre-nm-in" placeholder="プリセット名">
