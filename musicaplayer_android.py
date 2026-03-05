@@ -672,6 +672,7 @@ input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;width:22px;heig
 
 /* ── ユーティリティ ── */
 .xubuntu-banner{{background:linear-gradient(135deg,#1a1a2e,#16213e);border:1px solid var(--ac);border-radius:12px;padding:10px 14px;font-size:12.5px;color:var(--ac2);text-align:center;margin-bottom:13px;letter-spacing:.02em}}
+.xubuntu-banner a{{color:var(--ac2);text-decoration:underline;text-underline-offset:3px}}
 .empty{{text-align:center;color:var(--tx2);padding:40px 20px;font-size:14px;line-height:1.8}}
 .loading{{text-align:center;padding:30px;color:var(--tx2)}}
 </style>
@@ -687,7 +688,7 @@ input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;width:22px;heig
 
 <!-- ── Now Playing ── -->
 <div id="pg-now" class="page active">
-  <div class="xubuntu-banner">🎶 Xubuntu24版へのステップアップでさらに高音質・多機能に！</div>
+  <div class="xubuntu-banner">🎶 <a href="https://sites.google.com/view/aimusicplayer-sonia/" target="_blank">Xubuntu24版へのステップアップでさらに高音質・多機能に！</a></div>
   <div class="np-card">
     <div class="cover-wrap">
       <div class="cover-icon" id="cover-icon">🎵</div>
@@ -731,7 +732,7 @@ input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;width:22px;heig
 
 <!-- ── Library ── -->
 <div id="pg-lib" class="page">
-  <div class="xubuntu-banner">🎶 Xubuntu24版へのステップアップでさらに高音質・多機能に！</div>
+  <div class="xubuntu-banner">🎶 <a href="https://sites.google.com/view/aimusicplayer-sonia/" target="_blank">Xubuntu24版へのステップアップでさらに高音質・多機能に！</a></div>
   <input class="srch" type="search" id="srch" placeholder="🔍 曲名・アーティスト・アルバムで検索..." oninput="filterTrks()">
   <div class="view-toggle">
     <button class="vbtn on" id="vbtn-list" onclick="setView('list')">☰ リスト</button>
@@ -744,13 +745,13 @@ input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;width:22px;heig
 
 <!-- ── Radio ── -->
 <div id="pg-radio" class="page">
-  <div class="xubuntu-banner">🎶 Xubuntu24版へのステップアップでさらに高音質・多機能に！</div>
+  <div class="xubuntu-banner">🎶 <a href="https://sites.google.com/view/aimusicplayer-sonia/" target="_blank">Xubuntu24版へのステップアップでさらに高音質・多機能に！</a></div>
   <div id="radio-list"></div>
 </div>
 
 <!-- ── Settings ── -->
 <div id="pg-set" class="page">
-  <div class="xubuntu-banner">🎶 Xubuntu24版へのステップアップでさらに高音質・多機能に！</div>
+  <div class="xubuntu-banner">🎶 <a href="https://sites.google.com/view/aimusicplayer-sonia/" target="_blank">Xubuntu24版へのステップアップでさらに高音質・多機能に！</a></div>
   <div class="sec">現在の設定をプリセット保存</div>
   <div class="pre-save">
     <input type="text" id="pre-nm-in" placeholder="プリセット名">
@@ -872,9 +873,11 @@ function updateNP() {{
     miniPlay.style.textShadow = 'none';
   }}
 
-  // 音量
-  document.getElementById('vol-sl' ).value = st.volume||85;
-  document.getElementById('vol-val').textContent = st.volume||85;
+  // 音量（ドラッグ中は上書きしない）
+  if (!_volDragging) {{
+    document.getElementById('vol-sl' ).value = st.volume||85;
+    document.getElementById('vol-val').textContent = st.volume||85;
+  }}
 }}
 
 function updateMini() {{
@@ -903,8 +906,16 @@ async function api(action) {{
   await fetch('/api/'+action, {{method:'POST'}});
 }}
 
-function onVol(v)  {{ document.getElementById('vol-val').textContent=v; }}
+function onVol(v)  {{
+  document.getElementById('vol-val').textContent=v;
+}}
+let _volDragging = false;
+document.getElementById('vol-sl').addEventListener('pointerdown', () => {{ _volDragging = true; }});
+document.getElementById('vol-sl').addEventListener('pointerup',   () => {{ _volDragging = false; }});
+document.getElementById('vol-sl').addEventListener('touchstart',  () => {{ _volDragging = true; }}, {{passive:true}});
+document.getElementById('vol-sl').addEventListener('touchend',    () => {{ _volDragging = false; }});
 async function sendVol(v) {{
+  _volDragging = false;
   await fetch('/api/volume',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{volume:+v}})}});
 }}
 
