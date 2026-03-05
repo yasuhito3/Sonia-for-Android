@@ -873,11 +873,9 @@ function updateNP() {{
     miniPlay.style.textShadow = 'none';
   }}
 
-  // 音量（ドラッグ中は上書きしない）
-  if (!_volDragging) {{
-    document.getElementById('vol-sl' ).value = st.volume||85;
-    document.getElementById('vol-val').textContent = st.volume||85;
-  }}
+  // 音量
+  document.getElementById('vol-sl' ).value = st.volume||85;
+  document.getElementById('vol-val').textContent = st.volume||85;
 }}
 
 function updateMini() {{
@@ -906,16 +904,8 @@ async function api(action) {{
   await fetch('/api/'+action, {{method:'POST'}});
 }}
 
-function onVol(v)  {{
-  document.getElementById('vol-val').textContent=v;
-}}
-let _volDragging = false;
-document.getElementById('vol-sl').addEventListener('pointerdown', () => {{ _volDragging = true; }});
-document.getElementById('vol-sl').addEventListener('pointerup',   () => {{ _volDragging = false; }});
-document.getElementById('vol-sl').addEventListener('touchstart',  () => {{ _volDragging = true; }}, {{passive:true}});
-document.getElementById('vol-sl').addEventListener('touchend',    () => {{ _volDragging = false; }});
+function onVol(v)  {{ document.getElementById('vol-val').textContent=v; }}
 async function sendVol(v) {{
-  _volDragging = false;
   await fetch('/api/volume',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{volume:+v}})}});
 }}
 
