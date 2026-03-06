@@ -134,23 +134,25 @@ GAIN_LABELS = {
 # ══════════════════════════════════════════════
 RADIO_STATIONS = [
     {'name':'Classic FM',          'url':'https://media-ssl.musicradio.com/ClassicFM',
-     'desc':'英国クラシック専門局', 'flag':'🇬🇧'},
+     'desc':'英国のクラシック音楽専門局', 'flag':'🇬🇧'},
     {'name':'Classic FM Calm',     'url':'https://media-ssl.musicradio.com/ClassicFMCalm',
      'desc':'リラックス系クラシック', 'flag':'🇬🇧'},
-    {'name':'WQXR',                'url':'https://stream.wqxr.org/js-wqxr',
-     'desc':'ニューヨーク・クラシック局', 'flag':'🇺🇸'},
-    {'name':'Radio Swiss Classic', 'url':'http://stream.srg-ssr.ch/rsc_de/mp3_128.m3u',
-     'desc':'スイス・クラシック', 'flag':'🇨🇭'},
-    {'name':'France Musique',      'url':'http://direct.francemusique.fr/live/francemusique-hifi.mp3',
-     'desc':'フランス国営クラシック', 'flag':'🇫🇷'},
-    {'name':'Jazz24',              'url':'https://live.wostreaming.net/direct/ppm-jazz24aac256-ibc1',
-     'desc':'ジャズ専門局', 'flag':'🇺🇸'},
-    {'name':'SomaFM Groove Salad', 'url':'https://ice2.somafm.com/groovesalad-256-mp3',
-     'desc':'チルアウト・アンビエント', 'flag':'🇺🇸'},
-    {'name':'NHK-FM',              'url':'https://nhkwlive-ojp.akamaized.net/hls/live/2003459/nhkwlive-fm-ojp/index.m3u8',
-     'desc':'NHK FM', 'flag':'🇯🇵'},
-    {'name':'KJAZZ 88.1',          'url':'https://streaming.live365.com/a49833',
-     'desc':'ロサンゼルス・ジャズ&ブルース', 'flag':'🇺🇸'},
+    {'name':'Classic FM Movies',   'url':'https://media-ssl.musicradio.com/ClassicFM-M-Movies',
+     'desc':'映画音楽専門チャンネル', 'flag':'🇬🇧'},
+    {'name':'Radio X Classic Rock','url':'https://media-ssl.musicradio.com/RadioXClassicRock',
+     'desc':'クラシックロック専門局', 'flag':'🇬🇧'},
+    {'name':'Capital FM',          'url':'https://media-ssl.musicradio.com/CapitalUK',
+     'desc':'ポップス・Top40チャート', 'flag':'🇬🇧'},
+    {'name':'Heart',               'url':'https://media-ssl.musicradio.com/HeartUK',
+     'desc':'アダルト・コンテンポラリー・ポップス', 'flag':'🇬🇧'},
+    {'name':'Capital Xtra',        'url':'https://media-ssl.musicradio.com/CapitalXTRANational',
+     'desc':'ヒップホップ・R&B専門局', 'flag':'🇬🇧'},
+    {'name':'Smooth Radio',        'url':'https://media-ssl.musicradio.com/SmoothUK',
+     'desc':'スムースR&B・ソウル', 'flag':'🇬🇧'},
+    {'name':'Jazz24',              'url':'https://knkx-live-a.edge.audiocdn.com/6285_256k',
+     'desc':'NPR系ジャズ専門局・256kbps高音質', 'flag':'🇺🇸'},
+    {'name':'KJazz 88.1 FM',       'url':'https://streaming.live365.com/a49833',
+     'desc':'ロサンゼルス・ジャズ&ブルース (1981年〜)', 'flag':'🇺🇸'},
 ]
 
 # ══════════════════════════════════════════════
@@ -163,13 +165,18 @@ state = {
     'paused':        False,
     'radio_mode':    False,
     'volume':        85,
-    'eq_preset':     'none',
-    'gain_preset':   'classical',
-    'gain_db':       -3,
+    'eq_preset':      'none',
+    'gain_preset':    'classical',
+    'gain_db':        -3,
+    'bass_db':        0,
+    'treble_db':      0,
     'current_track': None,
     'cover_path':    None,
     '_skip_next':    False,
     '_skip_prev':    False,
+    'last_station':   None,   # 最後に再生したラジオ局
+    'last_radio_mode': False, # 停止前にラジオだったか
+    'last_position':  0,      # 最後の再生位置（秒）
 }
 
 mpv_proc        = None
@@ -360,13 +367,19 @@ def mpv_set(prop, val):
 #  ffmpegフィルタ生成
 # ══════════════════════════════════════════════
 def build_af(eq_preset, gain_db):
-    """ffmpeg -af 文字列を生成（ゲイン + EQ）"""
+    """ffmpeg -af 文字列を生成（ゲイン + EQ + 低音/高音トーン）"""
     freqs   = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
     bands   = EQ_PRESETS.get(eq_preset, EQ_PRESETS['none'])
     filters = [f'volume={gain_db}dB']
     for f, g in zip(freqs, bands):
         if g != 0:
             filters.append(f'equalizer=f={f}:width_type=o:width=2:g={g}')
+    bass = state.get('bass_db', 0)
+    if bass != 0:
+        filters.append(f'bass=g={bass}:f=100')
+    treble = state.get('treble_db', 0)
+    if treble != 0:
+        filters.append(f'treble=g={treble}:f=8000')
     return ','.join(filters)
 
 # ══════════════════════════════════════════════
@@ -426,6 +439,14 @@ def play_track(path):
             'duration': meta['duration'],
         }
         state['cover_path'] = get_cover(path)
+
+        # シーク位置が指定されていれば少し待ってからシーク
+        seek_pos = state.get('last_position', 0)
+        state['last_position'] = 0
+        if seek_pos > 2:
+            time.sleep(0.8)
+            mpv_set('time-pos', seek_pos)
+
         return mpv
     except FileNotFoundError as e:
         print(f"❌ コマンドが見つかりません: {e}")
@@ -448,10 +469,12 @@ def play_radio(station):
     ]
     try:
         mpv_proc = subprocess.Popen(cmd, stderr=subprocess.DEVNULL)
-        state['playing']       = True
-        state['paused']        = False
-        state['radio_mode']    = True
-        state['current_track'] = {
+        state['playing']        = True
+        state['paused']         = False
+        state['radio_mode']     = True
+        state['last_station']   = station
+        state['last_radio_mode']= True
+        state['current_track']  = {
             'path':     '',
             'title':    f"📻 {station['name']}",
             'artist':   station['desc'],
@@ -502,7 +525,21 @@ def _playlist_runner():
         state['playing'] = False
 
 
-def start_playlist(playlist, index=0):
+def restart_at_position():
+    """現在再生中の曲を現在位置から再起動（EQ/トーン変更時に使用）"""
+    if not state['playing'] or state['radio_mode']:
+        return
+    pos = 0
+    try:
+        v = mpv_get('time-pos')
+        if v is not None:
+            pos = float(v)
+    except Exception:
+        pass
+    start_playlist(state['playlist'], state['current_index'], seek=pos)
+
+
+def start_playlist(playlist, index=0, seek=0):
     global playlist_thread, stop_playlist
     stop_playlist = True
     if playlist_thread and playlist_thread.is_alive():
@@ -510,6 +547,7 @@ def start_playlist(playlist, index=0):
 
     state['playlist']      = list(playlist)
     state['current_index'] = index
+    state['last_position'] = seek
     stop_playlist          = False
     playlist_thread        = threading.Thread(target=_playlist_runner, daemon=True)
     playlist_thread.start()
@@ -673,6 +711,10 @@ input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;width:22px;heig
 /* ── ユーティリティ ── */
 .xubuntu-banner{{background:linear-gradient(135deg,#1a1a2e,#16213e);border:1px solid var(--ac);border-radius:12px;padding:10px 14px;font-size:12.5px;color:var(--ac2);text-align:center;margin-bottom:13px;letter-spacing:.02em}}
 .xubuntu-banner a{{color:var(--ac2);text-decoration:underline;text-underline-offset:3px}}
+/* ── トーンスライダー ── */
+.tone-row{{display:flex;align-items:center;gap:10px;margin:6px 0}}
+.tone-label{{font-size:12px;color:var(--tx2);width:36px;text-align:right;flex-shrink:0}}
+.tone-val{{font-size:12px;color:var(--ac2);width:36px;text-align:left;flex-shrink:0}}
 .empty{{text-align:center;color:var(--tx2);padding:40px 20px;font-size:14px;line-height:1.8}}
 .loading{{text-align:center;padding:30px;color:var(--tx2)}}
 </style>
@@ -725,6 +767,20 @@ input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;width:22px;heig
 
   <div class="sec">EQプリセット</div>
   <div class="chips" id="eq-chips"></div>
+
+  <div class="sec">低音・高音 調整</div>
+  <div class="tone-row">
+    <span class="tone-label">🔉低音</span>
+    <input type="range" id="bass-sl" min="-12" max="12" value="0" step="1"
+           oninput="onTone('bass', this.value)">
+    <span class="tone-val" id="bass-val">0dB</span>
+  </div>
+  <div class="tone-row">
+    <span class="tone-label">🔔高音</span>
+    <input type="range" id="treble-sl" min="-12" max="12" value="0" step="1"
+           oninput="onTone('treble', this.value)">
+    <span class="tone-val" id="treble-val">0dB</span>
+  </div>
 
   <div class="sec">ゲインプリセット</div>
   <div class="chips" id="gain-chips"></div>
@@ -876,6 +932,10 @@ function updateNP() {{
   // 音量
   document.getElementById('vol-sl' ).value = st.volume||85;
   document.getElementById('vol-val').textContent = st.volume||85;
+
+  // 低音・高音スライダー同期
+  if (st.bass_db   !== undefined) {{ const bv=st.bass_db||0;   document.getElementById('bass-sl').value=bv;   document.getElementById('bass-val').textContent=(bv>0?'+':'')+bv+'dB'; }}
+  if (st.treble_db !== undefined) {{ const tv=st.treble_db||0; document.getElementById('treble-sl').value=tv; document.getElementById('treble-val').textContent=(tv>0?'+':'')+tv+'dB'; }}
 }}
 
 function updateMini() {{
@@ -920,6 +980,26 @@ async function setGain(k, el) {{
   el.classList.add('on');
   await fetch('/api/gain',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{gain_preset:k}})}});
 }}
+
+// ── 低音・高音トーン ──
+let _toneTimers = {{}};
+function onTone(type, v) {{
+  const sign = v > 0 ? '+' : '';
+  document.getElementById(type+'-val').textContent = sign+v+'dB';
+  clearTimeout(_toneTimers[type]);
+  _toneTimers[type] = setTimeout(() => sendTone(), 400);
+}}
+async function sendTone() {{
+  const bass   = +document.getElementById('bass-sl').value;
+  const treble = +document.getElementById('treble-sl').value;
+  await fetch('/api/tone', {{method:'POST', headers:{{'Content-Type':'application/json'}},
+    body: JSON.stringify({{bass_db: bass, treble_db: treble}})}});
+}}
+['bass-sl','treble-sl'].forEach(id => {{
+  const el = document.getElementById(id);
+  el.addEventListener('touchend',  () => {{ clearTimeout(_toneTimers.bass); clearTimeout(_toneTimers.treble); sendTone(); }}, {{passive:true}});
+  el.addEventListener('pointerup', () => {{ clearTimeout(_toneTimers.bass); clearTimeout(_toneTimers.treble); sendTone(); }});
+}});
 
 // ── シーク ──
 document.getElementById('prog-bar').addEventListener('click', e => {{
@@ -1105,14 +1185,21 @@ async function fetchPresets() {{
   const el=document.getElementById('pre-list');
   const keys=Object.keys(p);
   if (!keys.length) {{ el.innerHTML='<div class="empty">保存済みプリセットはありません</div>'; return; }}
-  el.innerHTML=keys.map(k=>`<div class="pre-item">
+  el.innerHTML=keys.map(k=>{{
+    const bass   = p[k].bass_db   || 0;
+    const treble = p[k].treble_db || 0;
+    const toneStr = (bass !== 0 || treble !== 0)
+      ? ` · 低音${{bass>0?'+':''}}${{bass}}dB 高音${{treble>0?'+':''}}${{treble}}dB`
+      : '';
+    return `<div class="pre-item">
     <div class="pre-name">
       <div class="pre-nm">🔖 ${{esc(k)}}</div>
-      <div class="pre-info">EQ: ${{EQ_LABELS[p[k].eq_preset]||p[k].eq_preset}} / ${{GAIN_LABELS[p[k].gain_preset]||p[k].gain_preset}}</div>
+      <div class="pre-info">EQ: ${{EQ_LABELS[p[k].eq_preset]||p[k].eq_preset}} / ${{GAIN_LABELS[p[k].gain_preset]||p[k].gain_preset}}${{toneStr}}</div>
     </div>
     <button class="btn-sm btn-load" onclick="loadPreset('${{esc(k)}}')">読込</button>
     <button class="btn-sm btn-del"  onclick="delPreset('${{esc(k)}}')">削除</button>
-  </div>`).join('');
+  </div>`;
+  }}).join('');
 }}
 
 async function savePreset() {{
@@ -1309,13 +1396,18 @@ class Handler(BaseHTTPRequestHandler):
         # ── トランスポート ──
         elif p == '/api/play':
             if not state['playing']:
-                # 停止中 → 再生開始
-                playlist = state.get('playlist', [])
-                idx      = state.get('current_index', 0)
-                if playlist:
-                    if idx < 0 or idx >= len(playlist):
-                        idx = 0
-                    start_playlist(playlist, idx)
+                if state.get('last_radio_mode') and state.get('last_station'):
+                    # ラジオを最後に再生 → 同じ局を再開
+                    threading.Thread(
+                        target=play_radio, args=(state['last_station'],), daemon=True
+                    ).start()
+                else:
+                    playlist = state.get('playlist', [])
+                    idx      = state.get('current_index', 0)
+                    if playlist:
+                        if idx < 0 or idx >= len(playlist):
+                            idx = 0
+                        start_playlist(playlist, idx, seek=state.get('last_position', 0))
             self._json({'playing': state['playing']})
 
         elif p == '/api/next':
@@ -1327,8 +1419,18 @@ class Handler(BaseHTTPRequestHandler):
             self._json({'ok': True})
 
         elif p == '/api/stop':
+            # 停止前の状態を記憶
+            state['last_radio_mode'] = state.get('radio_mode', False)
+            if state['playing'] and not state.get('radio_mode'):
+                try:
+                    v = mpv_get('time-pos')
+                    if v is not None:
+                        state['last_position'] = float(v)
+                except Exception:
+                    pass
             stop_playlist = True
             stop_mpv()
+            state['playing']       = False
             state['current_track'] = None
             state['cover_path']    = None
             self._json({'ok': True})
@@ -1346,9 +1448,7 @@ class Handler(BaseHTTPRequestHandler):
             if preset in EQ_PRESETS:
                 state['eq_preset'] = preset
                 if state['playing'] and not state['radio_mode']:
-                    # 曲を再起動してフィルタを適用
-                    idx = state['current_index']
-                    start_playlist(state['playlist'], idx)
+                    restart_at_position()
             self._json({'eq_preset': preset})
 
         # ── ゲイン ──
@@ -1358,9 +1458,16 @@ class Handler(BaseHTTPRequestHandler):
                 state['gain_preset'] = preset
                 state['gain_db']     = GAIN_PRESETS[preset]
                 if state['playing'] and not state['radio_mode']:
-                    idx = state['current_index']
-                    start_playlist(state['playlist'], idx)
+                    restart_at_position()
             self._json({'gain_preset': preset})
+
+        # ── 低音・高音トーン ──
+        elif p == '/api/tone':
+            state['bass_db']   = max(-12, min(12, int(data.get('bass_db',   0))))
+            state['treble_db'] = max(-12, min(12, int(data.get('treble_db', 0))))
+            if state['playing'] and not state['radio_mode']:
+                restart_at_position()
+            self._json({'bass_db': state['bass_db'], 'treble_db': state['treble_db']})
 
         # ── シーク ──
         elif p == '/api/seek':
@@ -1395,6 +1502,8 @@ class Handler(BaseHTTPRequestHandler):
                     'eq_preset':   state['eq_preset'],
                     'gain_preset': state['gain_preset'],
                     'gain_db':     state['gain_db'],
+                    'bass_db':     state.get('bass_db',   0),
+                    'treble_db':   state.get('treble_db', 0),
                     'volume':      state['volume'],
                 }
                 save_presets(pre)
@@ -1408,10 +1517,12 @@ class Handler(BaseHTTPRequestHandler):
                 state['eq_preset']   = p2.get('eq_preset',   'none')
                 state['gain_preset'] = p2.get('gain_preset', 'classical')
                 state['gain_db']     = p2.get('gain_db',     -3)
+                state['bass_db']     = p2.get('bass_db',     0)
+                state['treble_db']   = p2.get('treble_db',   0)
                 state['volume']      = p2.get('volume',      85)
                 mpv_set('volume', state['volume'])
                 if state['playing'] and not state['radio_mode']:
-                    start_playlist(state['playlist'], state['current_index'])
+                    restart_at_position()
             self._json({'ok': True})
 
         elif p == '/api/presets/delete':
