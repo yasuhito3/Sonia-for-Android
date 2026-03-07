@@ -124,8 +124,8 @@ GAIN_PRESETS = {
 }
 GAIN_LABELS = {
     'classical':'クラシック (0dB)',
-    'jazz_pop': 'ジャズ/ポップ (-2dB)',
-    'loud':     '大音量 (-3dB)',
+    'jazz_pop': 'ジャズ/ポップ (-4dB)',
+    'loud':     '大音量 (-6dB)',
     'quiet':    '静音 (+2dB)',
 }
 
