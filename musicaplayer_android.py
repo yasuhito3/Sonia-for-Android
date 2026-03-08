@@ -117,16 +117,16 @@ EQ_LABELS = {
 #  ゲインプリセット (dB)
 # ══════════════════════════════════════════════
 GAIN_PRESETS = {
-    'classical': -3,
-    'jazz_pop':   0,
-    'loud':       3,
-    'quiet':     -6,
+    'classical':  0,
+    'jazz_pop':  -4,
+    'loud':      -6,
+    'quiet':      2,
 }
 GAIN_LABELS = {
-    'classical':'クラシック (-3dB)',
-    'jazz_pop': 'ジャズ/ポップ (0dB)',
-    'loud':     '大音量 (+3dB)',
-    'quiet':    '静音 (-6dB)',
+    'classical':'クラシック (0dB)',
+    'jazz_pop': 'ジャズ/ポップ (-4dB)',
+    'loud':     '大音量 (-6dB)',
+    'quiet':    '静音 (2dB)',
 }
 
 # ══════════════════════════════════════════════
