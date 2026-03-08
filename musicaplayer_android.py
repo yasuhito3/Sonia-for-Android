@@ -99,7 +99,7 @@ MPV_SOCKET     = '/tmp/mpvsocket_android'
 EQ_PRESETS = {
     'none':       [0,  0,  0,  0,  0,  0,  0,  0,  0,  0],
     'classical':  [6,  5,  4,  2,  0,  0,  1,  3,  4,  4],
-    'jazz':       [4,  3,  2,  2,  2,  2,  2,  3,  3,  2],
+    'jazz':       [6,  4,  3,  3,  3,  3,  3,  4,  4,  3],
     'rock':       [4,  3,  2,  1, -1, -1,  0,  2,  3,  4],
     'pop':        [-1,-1,  0,  2,  4,  4,  2,  0, -1, -2],
     'bass_boost': [6,  5,  4,  2,  0,  0,  0,  0,  0,  0],
@@ -117,16 +117,16 @@ EQ_LABELS = {
 #  ゲインプリセット (dB)
 # ══════════════════════════════════════════════
 GAIN_PRESETS = {
-    'classical':  0,
-    'jazz_pop':  -4,
-    'loud':      -6,
-    'quiet':      2
+    'classical': -3,
+    'jazz_pop':   0,
+    'loud':       3,
+    'quiet':     -6,
 }
 GAIN_LABELS = {
-    'classical':'クラシック (0dB)',
-    'jazz_pop': 'ジャズ/ポップ (-4dB)',
-    'loud':     '大音量 (-6dB)',
-    'quiet':    '静音 (+2dB)',
+    'classical':'クラシック (-3dB)',
+    'jazz_pop': 'ジャズ/ポップ (0dB)',
+    'loud':     '大音量 (+3dB)',
+    'quiet':    '静音 (-6dB)',
 }
 
 # ══════════════════════════════════════════════
@@ -380,6 +380,8 @@ def build_af(eq_preset, gain_db):
     treble = state.get('treble_db', 0)
     if treble != 0:
         filters.append(f'treble=g={treble}:f=8000')
+    # ── ピーククリッピング防止（EQ/bass/trebleで持ち上がった音を0.98dBFSで制限）──
+    filters.append('alimiter=level_in=1.0:level_out=1.0:limit=0.98:attack=5:release=50')
     return ','.join(filters)
 
 # ══════════════════════════════════════════════
