@@ -117,13 +117,13 @@ EQ_LABELS = {
 #  ゲインプリセット (dB)
 # ══════════════════════════════════════════════
 GAIN_PRESETS = {
-    'classical':  0,
+    'classical': -3,
     'jazz_pop':  -4,
     'loud':      -6,
     'quiet':      2,
 }
 GAIN_LABELS = {
-    'classical':'クラシック (0dB)',
+    'classical':'クラシック (-3dB)',
     'jazz_pop': 'ジャズ/ポップ (-4dB)',
     'loud':     '大音量 (-6dB)',
     'quiet':    '静音 (2dB)',
@@ -368,9 +368,17 @@ def mpv_set(prop, val):
 # ══════════════════════════════════════════════
 def build_af(eq_preset, gain_db):
     """ffmpeg -af 文字列を生成（ゲイン + EQ + 低音/高音トーン）"""
-    freqs   = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
-    bands   = EQ_PRESETS.get(eq_preset, EQ_PRESETS['none'])
-    filters = [f'volume={gain_db}dB']
+    freqs = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
+    bands = EQ_PRESETS.get(eq_preset, EQ_PRESETS['none'])
+
+    # ── Android DAC 音割れ対策: EQ/bass/trebleの最大ブースト分を事前に引いてヘッドルーム確保 ──
+    max_eq_boost   = max((g for g in bands if g > 0), default=0)
+    bass_boost     = max(state.get('bass_db',   0), 0)
+    treble_boost   = max(state.get('treble_db', 0), 0)
+    total_boost    = max_eq_boost + bass_boost + treble_boost
+    pre_volume_db  = gain_db - total_boost  # EQ後に0dBを超えないよう先引き
+
+    filters = [f'volume={pre_volume_db:.1f}dB']
     for f, g in zip(freqs, bands):
         if g != 0:
             filters.append(f'equalizer=f={f}:width_type=o:width=2:g={g}')
@@ -380,8 +388,9 @@ def build_af(eq_preset, gain_db):
     treble = state.get('treble_db', 0)
     if treble != 0:
         filters.append(f'treble=g={treble}:f=8000')
-    # ── ピーククリッピング防止（EQ/bass/trebleで持ち上がった音を0.98dBFSで制限）──
-    filters.append('alimiter=level_in=1.0:level_out=1.0:limit=0.98:attack=5:release=50')
+    # ── ★ Android DAC対応リミッター: limit=0.89 (-1dBFS) でハードウェアクリップを防ぐ ──
+    # limit=0.98 (≈0dBFS) はAndroidの廉価DAC には近すぎて物理的な歪みを起こしやすい
+    filters.append('alimiter=level_in=1.0:level_out=0.89:limit=0.89:attack=5:release=50')
     return ','.join(filters)
 
 # ══════════════════════════════════════════════
