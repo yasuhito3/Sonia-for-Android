@@ -2094,11 +2094,11 @@ def main():
 
     def _shutdown(sig=None, frame=None):
         """Ctrl+C でクリーンに終了 → ターミナルフリーズ防止"""
+        global stop_playlist
         print("\n👋 終了処理中...")
         # 1. mpv停止
         stop_mpv()
         # 2. プレイリストスレッド停止
-        global stop_playlist
         stop_playlist = True
         # 3. HTTPサーバー停止（別スレッドから呼ぶ）
         t = threading.Thread(target=server.shutdown, daemon=True)
