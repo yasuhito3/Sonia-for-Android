@@ -1981,7 +1981,6 @@ class Handler(BaseHTTPRequestHandler):
             if not items:
                 self._json({'ok': False, 'reason': 'プレイリストが空です'})
                 return
-            global stop_playlist
             stop_playlist = True
             stop_mpv()
             start_stream_playlist(items)
