@@ -384,6 +384,7 @@ def build_af(eq_preset, gain_db):
     filters.append('alimiter=level_in=1.0:level_out=1.0:limit=0.98:attack=5:release=50')
     return ','.join(filters)
 
+
 # ══════════════════════════════════════════════
 #  ストリーム検索・再生（yt-dlp）
 # ══════════════════════════════════════════════
@@ -394,24 +395,13 @@ def _ytdlp_available():
 
 
 def search_stream(query, source='youtube', max_results=8):
-    """
-    yt-dlp で YouTube / SoundCloud を検索し結果リストを返す。
-    source: 'youtube' → ytsearch  /  'soundcloud' → scsearch
-    """
     if not _ytdlp_available():
         return {'error': 'yt-dlp が見つかりません。pkg install yt-dlp を実行してください。'}
-
     prefix = 'ytsearch' if source == 'youtube' else 'scsearch'
-    search_query = f'{prefix}{max_results}:{query}'
-
     cmd = [
-        'yt-dlp',
-        '--no-playlist',
-        '--flat-playlist',
-        '-j',
-        '--no-warnings',
-        '--ignore-errors',
-        search_query,
+        'yt-dlp', '--no-playlist', '--flat-playlist', '-j',
+        '--no-warnings', '--ignore-errors',
+        f'{prefix}{max_results}:{query}',
     ]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
@@ -422,13 +412,12 @@ def search_stream(query, source='youtube', max_results=8):
                 continue
             try:
                 info = json.loads(line)
-                duration = info.get('duration') or 0
                 items.append({
                     'id':        info.get('id', ''),
                     'url':       info.get('url') or info.get('webpage_url', ''),
                     'title':     info.get('title', '不明'),
                     'uploader':  info.get('uploader') or info.get('channel', ''),
-                    'duration':  int(duration),
+                    'duration':  int(info.get('duration') or 0),
                     'thumbnail': info.get('thumbnail', ''),
                     'source':    source,
                 })
@@ -442,121 +431,78 @@ def search_stream(query, source='youtube', max_results=8):
 
 
 def resolve_and_play_stream(video_url, title='', artist='', duration=0, thumbnail=''):
-    """
-    yt-dlp でストリームURLを解決して ffmpeg → mpv パイプで再生（ブロッキング）。
-    EQフィルタは通常の play_track と同じ build_af() を使用。
-    """
     global mpv_proc
     stop_mpv()
-
     if not _ytdlp_available():
         print('❌ yt-dlp が見つかりません')
         return None
-
-    cmd_resolve = [
-        'yt-dlp',
-        '-f', 'bestaudio',
-        '--get-url',
-        '--no-warnings',
-        video_url,
-    ]
     try:
-        r = subprocess.run(cmd_resolve, capture_output=True, text=True, timeout=15)
+        r = subprocess.run(
+            ['yt-dlp', '-f', 'bestaudio', '--get-url', '--no-warnings', video_url],
+            capture_output=True, text=True, timeout=15
+        )
         stream_url = r.stdout.strip().splitlines()[0]
         if not stream_url:
-            print('❌ ストリームURL取得失敗')
             return None
-    except subprocess.TimeoutExpired:
-        print('❌ yt-dlp タイムアウト')
-        return None
     except Exception as e:
         print(f'❌ resolve エラー: {e}')
         return None
 
     af = build_af(state['eq_preset'], state['gain_db'])
-
-    cmd_ff = [
-        'ffmpeg', '-hide_banner', '-loglevel', 'quiet',
-        '-i', stream_url,
-        '-af', af,
-        '-f', 'wav', '-'
-    ]
-    cmd_mpv = [
-        'mpv', '--no-video', '--really-quiet',
-        f'--input-ipc-server={MPV_SOCKET}',
-        f'--volume={state["volume"]}',
-        '--audio-buffer=0.5',
-        '-'
-    ]
-
     try:
-        ff  = subprocess.Popen(cmd_ff,  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        mpv = subprocess.Popen(cmd_mpv, stdin=ff.stdout,        stderr=subprocess.DEVNULL)
+        ff  = subprocess.Popen(
+            ['ffmpeg', '-hide_banner', '-loglevel', 'quiet', '-i', stream_url, '-af', af, '-f', 'wav', '-'],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        mpv = subprocess.Popen(
+            ['mpv', '--no-video', '--really-quiet',
+             f'--input-ipc-server={MPV_SOCKET}',
+             f'--volume={state["volume"]}', '--audio-buffer=0.5', '-'],
+            stdin=ff.stdout, stderr=subprocess.DEVNULL)
         ff.stdout.close()
         mpv_proc = mpv
-
-        state['playing']        = True
-        state['paused']         = False
-        state['radio_mode']     = True
-        state['last_radio_mode']= True
-        state['current_track']  = {
-            'path':     video_url,
-            'title':    title or video_url,
-            'artist':   artist,
-            'album':    '🎬 ストリーム再生',
-            'duration': duration,
+        state['playing']         = True
+        state['paused']          = False
+        state['radio_mode']      = True
+        state['last_radio_mode'] = True
+        state['current_track']   = {
+            'path': video_url, 'title': title or video_url,
+            'artist': artist, 'album': '🎬 ストリーム再生', 'duration': duration,
         }
-        # サムネイルURLをカバー代わりに保存
-        state['cover_path']     = thumbnail if thumbnail else None
-
+        state['cover_path'] = thumbnail if thumbnail else None
         return mpv
     except Exception as e:
         print(f'❌ ストリーム再生エラー: {e}')
         return None
 
 
-# ストリームプレイリスト用グローバル
+# ストリームプレイリスト
 stream_pl_thread = None
 stop_stream_pl   = False
 
-
 def _stream_pl_runner(items):
-    """ストリームプレイリストを順番に再生するスレッド"""
     global stop_stream_pl
     stop_stream_pl = False
     idx = 0
-
     while not stop_stream_pl and idx < len(items):
         item = items[idx]
         proc = resolve_and_play_stream(
-            item['url'],
-            item.get('title', ''),
-            item.get('artist', ''),
-            item.get('duration', 0),
-            item.get('thumbnail', ''),
-        )
+            item['url'], item.get('title',''), item.get('artist',''),
+            item.get('duration',0), item.get('thumbnail',''))
         if proc is None:
             idx += 1
             continue
-
-        # 再生終了待ち
         while proc.poll() is None and not stop_stream_pl:
             if state.get('_skip_next'):
                 state['_skip_next'] = False
-                stop_mpv()
-                break
+                stop_mpv(); break
             if state.get('_skip_prev'):
                 state['_skip_prev'] = False
-                idx = max(0, idx - 2)   # +1 されるので -2
-                stop_mpv()
-                break
+                idx = max(0, idx - 2)
+                stop_mpv(); break
             time.sleep(0.4)
-
         idx += 1
-
     if not stop_stream_pl:
         state['playing'] = False
-
 
 def start_stream_playlist(items):
     global stream_pl_thread, stop_stream_pl
@@ -564,11 +510,8 @@ def start_stream_playlist(items):
     if stream_pl_thread and stream_pl_thread.is_alive():
         stream_pl_thread.join(timeout=5)
     stop_stream_pl   = False
-    stream_pl_thread = threading.Thread(
-        target=_stream_pl_runner, args=(list(items),), daemon=True
-    )
+    stream_pl_thread = threading.Thread(target=_stream_pl_runner, args=(list(items),), daemon=True)
     stream_pl_thread.start()
-
 
 # ══════════════════════════════════════════════
 #  再生エンジン
@@ -997,22 +940,18 @@ input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;width:22px;heig
 <!-- ── Stream ── -->
 <div id="pg-stream" class="page">
   <div class="xubuntu-banner">🎶 <a href="https://sites.google.com/view/aimusicplayer-sonia/" target="_blank">Xubuntu24版へのステップアップでさらに高音質・多機能に！</a></div>
-
-  <!-- ソース選択 -->
   <div style="display:flex;gap:8px;margin-bottom:12px">
     <button id="btn-yt" onclick="setStreamSource('youtube')"
-      style="flex:1;padding:11px 0;border-radius:11px;border:1px solid var(--ac);background:var(--ac);color:#fff;font-size:13px;font-weight:700;cursor:pointer;transition:all .2s">
-      ▶ YouTube
+      style="flex:1;padding:11px 0;border-radius:11px;border:1px solid var(--ac);background:var(--ac);color:#fff;font-size:13px;font-weight:700;cursor:pointer">
+      &#9654; YouTube
     </button>
     <button id="btn-sc" onclick="setStreamSource('soundcloud')"
-      style="flex:1;padding:11px 0;border-radius:11px;border:1px solid var(--brd);background:var(--sf2);color:var(--tx2);font-size:13px;font-weight:700;cursor:pointer;transition:all .2s">
-      ☁ SoundCloud
+      style="flex:1;padding:11px 0;border-radius:11px;border:1px solid var(--brd);background:var(--sf2);color:var(--tx2);font-size:13px;font-weight:700;cursor:pointer">
+      &#9729; SoundCloud
     </button>
   </div>
-
-  <!-- 検索ボックス -->
   <div style="display:flex;gap:8px;margin-bottom:12px">
-    <input id="stream-query" type="search" placeholder="🔍 曲名・アーティスト名..."
+    <input id="stream-query" type="search" placeholder="曲名・アーティスト名..."
       class="srch" style="margin-bottom:0;flex:1"
       onkeydown="if(event.key==='Enter')searchStream()">
     <button onclick="searchStream()"
@@ -1020,30 +959,20 @@ input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;width:22px;heig
       検索
     </button>
   </div>
-
-  <!-- 結果リスト -->
-  <div id="stream-results">
-    <div class="empty">曲名やアーティスト名で検索してください<br><span style="font-size:12px">＋ボタンでプレイリストに追加できます</span></div>
-  </div>
+  <div id="stream-results"><div class="empty">曲名やアーティスト名で検索<br><span style="font-size:12px">&#xFF0B;ボタンでプレイリストに追加できます</span></div></div>
 </div>
 
-<!-- ── プレイリストパネル（全ページ共通・ミニプレイヤーの上に重ねる） ── -->
-<div id="pl-bar" style="display:none;position:fixed;bottom:72px;left:0;right:0;z-index:190;
-  background:rgba(124,106,247,.97);padding:0 14px;border-top:1px solid rgba(255,255,255,.15)">
-
-  <!-- 折りたたみ時バー -->
-  <div id="pl-bar-collapsed" onclick="togglePlPanel()"
-    style="display:flex;align-items:center;gap:10px;padding:11px 0;cursor:pointer">
-    <span style="font-size:18px">🎵</span>
+<!-- ── プレイリストバー ── -->
+<div id="pl-bar" style="display:none;position:fixed;bottom:72px;left:0;right:0;z-index:190;background:rgba(124,106,247,.97);padding:0 14px;border-top:1px solid rgba(255,255,255,.15)">
+  <div onclick="togglePlPanel()" style="display:flex;align-items:center;gap:10px;padding:11px 0;cursor:pointer">
+    <span style="font-size:18px">&#127925;</span>
     <span id="pl-bar-label" style="flex:1;font-size:13px;font-weight:700;color:#fff">プレイリスト 0曲</span>
     <button onclick="event.stopPropagation();clearStreamPlaylist()"
       style="background:rgba(255,255,255,.2);border:none;color:#fff;border-radius:7px;padding:5px 10px;font-size:12px;cursor:pointer">クリア</button>
     <button onclick="event.stopPropagation();playStreamPlaylist()"
-      style="background:#fff;border:none;color:var(--ac);border-radius:8px;padding:7px 14px;font-size:13px;font-weight:700;cursor:pointer">▶ 再生</button>
-    <span id="pl-arrow" style="color:#fff;font-size:14px">▲</span>
+      style="background:#fff;border:none;color:var(--ac);border-radius:8px;padding:7px 14px;font-size:13px;font-weight:700;cursor:pointer">&#9654; 再生</button>
+    <span id="pl-arrow" style="color:#fff;font-size:14px">&#9650;</span>
   </div>
-
-  <!-- 展開時リスト -->
   <div id="pl-panel" style="display:none;max-height:240px;overflow-y:auto;padding-bottom:10px">
     <div id="pl-items"></div>
   </div>
@@ -1113,7 +1042,6 @@ function showPage(id, btn) {{
   btn.classList.add('active');
   if (id==='pg-lib'   && allTracks.length===0) doScan();
   if (id==='pg-radio' ) renderRadio();
-  if (id==='pg-stream') {{ /* 検索は手動で行う */ }}
   if (id==='pg-set'   ) {{ fetchPresets(); fetchDirs(); document.getElementById('srv-url').textContent=location.href; }}
 }}
 
@@ -1493,15 +1421,17 @@ async function rescan() {{
   alert(`✅ ${{d.count}}曲を読み込みました`);
 }}
 
+
 // ── ストリーム検索・再生・プレイリスト ──
-let streamSource   = 'youtube';
-let streamPlaylist = [];   // {{url,title,artist,duration,thumbnail}}
-let plPanelOpen    = false;
+var streamSource   = 'youtube';
+var streamPlaylist = [];
+var _lastResults   = [];
+var plPanelOpen    = false;
 
 function setStreamSource(src) {{
   streamSource = src;
-  const ytBtn = document.getElementById('btn-yt');
-  const scBtn = document.getElementById('btn-sc');
+  var ytBtn = document.getElementById('btn-yt');
+  var scBtn = document.getElementById('btn-sc');
   if (src === 'youtube') {{
     ytBtn.style.background = 'var(--ac)'; ytBtn.style.borderColor = 'var(--ac)'; ytBtn.style.color = '#fff';
     scBtn.style.background = 'var(--sf2)'; scBtn.style.borderColor = 'var(--brd)'; scBtn.style.color = 'var(--tx2)';
@@ -1512,145 +1442,140 @@ function setStreamSource(src) {{
 }}
 
 async function searchStream() {{
-  const q = document.getElementById('stream-query').value.trim();
+  var q = document.getElementById('stream-query').value.trim();
   if (!q) return;
-  const resDiv = document.getElementById('stream-results');
-  resDiv.innerHTML = '<div class="loading">🔍 検索中... (数秒かかります)</div>';
+  var resDiv = document.getElementById('stream-results');
+  resDiv.innerHTML = '<div class="loading">検索中... (数秒かかります)</div>';
   try {{
-    const r = await fetch('/api/stream/search', {{
+    var r = await fetch('/api/stream/search', {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
       body: JSON.stringify({{query: q, source: streamSource}})
     }});
-    const data = await r.json();
+    var data = await r.json();
     if (data.error) {{
-      resDiv.innerHTML = `<div style="color:var(--red);padding:14px;text-align:center">${{esc(data.error)}}</div>`;
+      resDiv.innerHTML = '<div style="color:var(--red);padding:14px;text-align:center">' + esc(data.error) + '</div>';
       return;
     }}
     if (!data.results || data.results.length === 0) {{
       resDiv.innerHTML = '<div class="empty">結果が見つかりませんでした</div>';
       return;
     }}
-    renderStreamResults(data.results);
+    _lastResults = data.results;
+    renderStreamResults();
   }} catch(e) {{
-    resDiv.innerHTML = `<div style="color:var(--red);padding:14px;text-align:center">エラー: ${{esc(String(e))}}</div>`;
+    resDiv.innerHTML = '<div style="color:var(--red);padding:14px;text-align:center">エラー: ' + esc(String(e)) + '</div>';
   }}
 }}
 
-// 検索結果を描画（＋ボタン付き）
-function renderStreamResults(results) {{
-  const resDiv = document.getElementById('stream-results');
-  // プレイリストに入っているURLのセット
-  const inPl = new Set(streamPlaylist.map(x => x.url));
-  resDiv.innerHTML = results.map((item) => {{
-    const dur      = item.duration ? fmt(item.duration) : '--:--';
-    const added    = inPl.has(item.url);
-    const thumb    = item.thumbnail
-      ? `<img src="${{item.thumbnail}}" style="width:60px;height:44px;object-fit:cover;border-radius:7px;flex-shrink:0" loading="lazy">`
-      : `<div style="width:60px;height:44px;background:var(--sf2);border-radius:7px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:22px">🎵</div>`;
-    const itemJson = JSON.stringify(item).replace(/\\/g,'\\\\').replace(/`/g,'\\`');
-    return `<div class="trk" style="border-radius:11px;background:var(--sf);margin-bottom:6px;gap:8px"
-              onclick='playStream(${{JSON.stringify(item)}})'>
-      ${{thumb}}
-      <div class="ti-info">
-        <div class="ti-title">${{esc(item.title)}}</div>
-        <div class="ti-sub">${{esc(item.uploader||'')}} · ${{dur}}</div>
-      </div>
-      <button id="plbtn-${{esc(item.id)}}"
-        onclick="event.stopPropagation();toggleStreamPl(${{JSON.stringify(item)}})"
-        style="background:${{added ? 'var(--grn)' : 'var(--sf2)'}};border:1.5px solid ${{added ? 'var(--grn)' : 'var(--brd)'}};
-               color:${{added ? '#fff' : 'var(--ac2)'}};border-radius:8px;
-               width:34px;height:34px;font-size:18px;cursor:pointer;flex-shrink:0;
-               display:flex;align-items:center;justify-content:center;font-weight:700;line-height:1">
-        ${{added ? '✓' : '＋'}}
-      </button>
-    </div>`;
-  }}).join('');
+function renderStreamResults() {{
+  var resDiv = document.getElementById('stream-results');
+  if (!resDiv) return;
+  var inPl = {{}};
+  for (var k = 0; k < streamPlaylist.length; k++) inPl[streamPlaylist[k].url] = true;
+  var html = '';
+  for (var i = 0; i < _lastResults.length; i++) {{
+    var item  = _lastResults[i];
+    var dur   = item.duration ? fmt(item.duration) : '--:--';
+    var added = !!inPl[item.url];
+    var thumbHtml = item.thumbnail
+      ? '<img src="' + esc(item.thumbnail) + '" style="width:60px;height:44px;object-fit:cover;border-radius:7px;flex-shrink:0" loading="lazy">'
+      : '<div style="width:60px;height:44px;background:var(--sf2);border-radius:7px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:22px">&#127925;</div>';
+    html += '<div class="trk" style="border-radius:11px;background:var(--sf);margin-bottom:6px;gap:8px" onclick="playStreamIdx(' + i + ')">'
+      + thumbHtml
+      + '<div class="ti-info">'
+      + '<div class="ti-title">' + esc(item.title) + '</div>'
+      + '<div class="ti-sub">' + esc(item.uploader || '') + ' &middot; ' + dur + '</div>'
+      + '</div>'
+      + '<button id="plbtn-' + i + '" onclick="event.stopPropagation();toggleStreamPlIdx(' + i + ')"'
+      + ' style="background:' + (added ? 'var(--grn)' : 'var(--sf2)') + ';'
+      + 'border:1.5px solid ' + (added ? 'var(--grn)' : 'var(--brd)') + ';'
+      + 'color:' + (added ? '#fff' : 'var(--ac2)') + ';'
+      + 'border-radius:8px;width:34px;height:34px;font-size:18px;cursor:pointer;flex-shrink:0;'
+      + 'display:flex;align-items:center;justify-content:center;font-weight:700;line-height:1">'
+      + (added ? '&#10003;' : '&#xFF0B;')
+      + '</button>'
+      + '</div>';
+  }}
+  resDiv.innerHTML = html;
 }}
 
-// ＋/✓ボタン: プレイリスト追加・解除トグル
-function toggleStreamPl(item) {{
-  const idx = streamPlaylist.findIndex(x => x.url === item.url);
-  if (idx === -1) {{
-    streamPlaylist.push(item);
-  }} else {{
-    streamPlaylist.splice(idx, 1);
+async function playStreamIdx(i) {{
+  var item = _lastResults[i];
+  if (!item) return;
+  document.getElementById('mini-title').textContent = item.title || '読み込み中...';
+  document.getElementById('mini-sub').textContent   = item.uploader || '';
+  await fetch('/api/stream/play', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{url: item.url, title: item.title,
+      artist: item.uploader || '', duration: item.duration || 0, thumbnail: item.thumbnail || ''}})
+  }});
+  showPage('pg-now', document.querySelector('.tab'));
+}}
+
+function toggleStreamPlIdx(i) {{
+  var item = _lastResults[i];
+  if (!item) return;
+  var idx = -1;
+  for (var j = 0; j < streamPlaylist.length; j++) {{
+    if (streamPlaylist[j].url === item.url) {{ idx = j; break; }}
   }}
+  if (idx === -1) {{ streamPlaylist.push(item); }} else {{ streamPlaylist.splice(idx, 1); }}
   updatePlBar();
-  // ボタン外観を更新
-  const btn = document.getElementById('plbtn-' + item.id);
+  var btn   = document.getElementById('plbtn-' + i);
+  var added = (idx === -1);
   if (btn) {{
-    const added = streamPlaylist.some(x => x.url === item.url);
-    btn.style.background    = added ? 'var(--grn)' : 'var(--sf2)';
-    btn.style.borderColor   = added ? 'var(--grn)' : 'var(--brd)';
-    btn.style.color         = added ? '#fff'       : 'var(--ac2)';
-    btn.textContent         = added ? '✓' : '＋';
+    btn.style.background  = added ? 'var(--grn)' : 'var(--sf2)';
+    btn.style.borderColor = added ? 'var(--grn)' : 'var(--brd)';
+    btn.style.color       = added ? '#fff'       : 'var(--ac2)';
+    btn.innerHTML         = added ? '&#10003;' : '&#xFF0B;';
   }}
 }}
 
-// プレイリストバー更新
 function updatePlBar() {{
-  const bar = document.getElementById('pl-bar');
-  const n   = streamPlaylist.length;
-  if (n === 0) {{
-    bar.style.display = 'none';
-    return;
-  }}
+  var bar = document.getElementById('pl-bar');
+  var n   = streamPlaylist.length;
+  if (n === 0) {{ bar.style.display = 'none'; return; }}
   bar.style.display = 'block';
-  document.getElementById('pl-bar-label').textContent = `プレイリスト ${{n}}曲`;
-  renderPlItems();
+  document.getElementById('pl-bar-label').textContent = 'プレイリスト ' + n + '曲';
+  if (plPanelOpen) renderPlItems();
 }}
 
-// プレイリスト内アイテム描画
 function renderPlItems() {{
-  const el = document.getElementById('pl-items');
-  el.innerHTML = streamPlaylist.map((item, i) => {{
-    const dur = item.duration ? fmt(item.duration) : '--:--';
-    return `<div style="display:flex;align-items:center;gap:8px;padding:7px 0;
-                border-bottom:1px solid rgba(255,255,255,.1)">
-      <span style="color:rgba(255,255,255,.5);font-size:12px;width:18px;text-align:center;flex-shrink:0">${{i+1}}</span>
-      <div style="flex:1;min-width:0">
-        <div style="font-size:13px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${{esc(item.title)}}</div>
-        <div style="font-size:11px;color:rgba(255,255,255,.6)">${{esc(item.uploader||'')}} · ${{dur}}</div>
-      </div>
-      <button onclick="removePlItem(${{i}})"
-        style="background:rgba(255,255,255,.15);border:none;color:#fff;border-radius:6px;
-               padding:5px 9px;font-size:13px;cursor:pointer;flex-shrink:0">✕</button>
-    </div>`;
-  }}).join('');
+  var el   = document.getElementById('pl-items');
+  var html = '';
+  for (var i = 0; i < streamPlaylist.length; i++) {{
+    var item = streamPlaylist[i];
+    var dur  = item.duration ? fmt(item.duration) : '--:--';
+    html += '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid rgba(255,255,255,.1)">'
+      + '<span style="color:rgba(255,255,255,.5);font-size:12px;width:18px;text-align:center;flex-shrink:0">' + (i+1) + '</span>'
+      + '<div style="flex:1;min-width:0">'
+      + '<div style="font-size:13px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(item.title) + '</div>'
+      + '<div style="font-size:11px;color:rgba(255,255,255,.6)">' + esc(item.uploader || '') + ' &middot; ' + dur + '</div>'
+      + '</div>'
+      + '<button onclick="removePlItem(' + i + ')" style="background:rgba(255,255,255,.15);border:none;color:#fff;border-radius:6px;padding:5px 9px;font-size:13px;cursor:pointer;flex-shrink:0">&#x2715;</button>'
+      + '</div>';
+  }}
+  el.innerHTML = html;
 }}
 
 function removePlItem(i) {{
-  const removed = streamPlaylist.splice(i, 1)[0];
-  // 検索結果のボタンも戻す
-  if (removed) {{
-    const btn = document.getElementById('plbtn-' + removed.id);
-    if (btn) {{
-      btn.style.background  = 'var(--sf2)';
-      btn.style.borderColor = 'var(--brd)';
-      btn.style.color       = 'var(--ac2)';
-      btn.textContent       = '＋';
-    }}
-  }}
+  streamPlaylist.splice(i, 1);
   updatePlBar();
+  renderStreamResults();
 }}
 
 function clearStreamPlaylist() {{
   streamPlaylist = [];
   updatePlBar();
-  // 全ボタンをリセット
-  document.querySelectorAll('[id^="plbtn-"]').forEach(btn => {{
-    btn.style.background  = 'var(--sf2)';
-    btn.style.borderColor = 'var(--brd)';
-    btn.style.color       = 'var(--ac2)';
-    btn.textContent       = '＋';
-  }});
+  renderStreamResults();
 }}
 
 function togglePlPanel() {{
   plPanelOpen = !plPanelOpen;
   document.getElementById('pl-panel').style.display = plPanelOpen ? 'block' : 'none';
-  document.getElementById('pl-arrow').textContent   = plPanelOpen ? '▼' : '▲';
+  document.getElementById('pl-arrow').textContent   = plPanelOpen ? '\u25BC' : '\u25B2';
   if (plPanelOpen) renderPlItems();
 }}
 
@@ -1661,36 +1586,9 @@ async function playStreamPlaylist() {{
     headers: {{'Content-Type': 'application/json'}},
     body: JSON.stringify({{items: streamPlaylist}})
   }});
-  // Now Playingへ移動
-  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  document.getElementById('pg-now').classList.add('active');
-  document.querySelector('.tab').classList.add('active');
-  // パネルを閉じる
+  showPage('pg-now', document.querySelector('.tab'));
   if (plPanelOpen) togglePlPanel();
 }}
-
-// 1曲だけ即再生
-async function playStream(item) {{
-  document.getElementById('mini-title').textContent = item.title || '読み込み中...';
-  document.getElementById('mini-sub').textContent   = item.uploader || '';
-  await fetch('/api/stream/play', {{
-    method: 'POST',
-    headers: {{'Content-Type': 'application/json'}},
-    body: JSON.stringify({{
-      url:       item.url,
-      title:     item.title,
-      artist:    item.uploader || '',
-      duration:  item.duration || 0,
-      thumbnail: item.thumbnail || '',
-    }})
-  }});
-  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  document.getElementById('pg-now').classList.add('active');
-  document.querySelector('.tab').classList.add('active');
-}}
-
 // ── 起動 ──
 setInterval(poll, 1500);
 poll();
@@ -1747,13 +1645,9 @@ class Handler(BaseHTTPRequestHandler):
                 v = mpv_get('time-pos')
                 if v is not None: pos = float(v)
             cv = state.get('cover_path')
-            # cover_path がURLの場合もhas_cover=Trueとして扱う
             has_cover = bool(cv and (cv.startswith('http') or os.path.exists(cv)))
-            cover_ts  = 0
-            if cv and not cv.startswith('http') and os.path.exists(cv):
-                cover_ts = int(os.path.getmtime(cv))
-            elif cv and cv.startswith('http'):
-                cover_ts = hash(cv) & 0x7fffffff
+            cover_ts  = (hash(cv) & 0x7fffffff) if cv and cv.startswith('http') else \
+                        (int(os.path.getmtime(cv)) if cv and os.path.exists(cv) else 0)
             self._json({**state,
                 'position':  pos,
                 'has_cover': has_cover,
@@ -1774,7 +1668,6 @@ class Handler(BaseHTTPRequestHandler):
 
         elif p == '/api/cover':
             cv = state.get('cover_path')
-            # ストリーム再生中はサムネイルURLへリダイレクト
             if cv and cv.startswith('http'):
                 self.send_response(302)
                 self.send_header('Location', cv)
@@ -1945,43 +1838,31 @@ class Handler(BaseHTTPRequestHandler):
             query  = data.get('query', '').strip()
             source = data.get('source', 'youtube')
             if not query:
-                self._json({'error': 'クエリが空です'})
-                return
+                self._json({'error': 'クエリが空です'}); return
             result_box = [None]
             def _search():
                 result_box[0] = search_stream(query, source)
             t = threading.Thread(target=_search, daemon=True)
-            t.start()
-            t.join(timeout=25)
-            if result_box[0] is None:
-                self._json({'error': '検索タイムアウト'})
-            else:
-                self._json(result_box[0])
+            t.start(); t.join(timeout=25)
+            self._json(result_box[0] if result_box[0] else {'error': '検索タイムアウト'})
 
-        # ── ストリーム再生 ──
+        # ── ストリーム1曲再生 ──
         elif p == '/api/stream/play':
-            url       = data.get('url', '')
-            title     = data.get('title', '')
-            artist    = data.get('artist', '')
-            duration  = int(data.get('duration', 0))
-            thumbnail = data.get('thumbnail', '')
+            url = data.get('url', '')
             if not url:
-                self._json({'ok': False, 'reason': 'URLが空です'})
-                return
+                self._json({'ok': False}); return
             threading.Thread(
                 target=resolve_and_play_stream,
-                args=(url, title, artist, duration, thumbnail),
-                daemon=True,
-            ).start()
+                args=(url, data.get('title',''), data.get('artist',''),
+                      int(data.get('duration',0)), data.get('thumbnail','')),
+                daemon=True).start()
             self._json({'ok': True})
 
         # ── ストリームプレイリスト再生 ──
         elif p == '/api/stream/playlist/play':
             items = data.get('items', [])
             if not items:
-                self._json({'ok': False, 'reason': 'プレイリストが空です'})
-                return
-            stop_playlist = True
+                self._json({'ok': False}); return
             stop_mpv()
             start_stream_playlist(items)
             self._json({'ok': True})
@@ -2094,11 +1975,11 @@ def main():
 
     def _shutdown(sig=None, frame=None):
         """Ctrl+C でクリーンに終了 → ターミナルフリーズ防止"""
-        global stop_playlist
         print("\n👋 終了処理中...")
         # 1. mpv停止
         stop_mpv()
         # 2. プレイリストスレッド停止
+        global stop_playlist
         stop_playlist = True
         # 3. HTTPサーバー停止（別スレッドから呼ぶ）
         t = threading.Thread(target=server.shutdown, daemon=True)
