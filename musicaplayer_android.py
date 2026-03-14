@@ -176,6 +176,7 @@ state = {
     '_skip_prev':    False,
     'last_station':   None,   # 最後に再生したラジオ局
     'last_radio_mode': False, # 停止前にラジオだったか
+    'last_stream_mode': False, # 停止前にストリーム再生だったか
     'last_position':  0,      # 最後の再生位置（秒）
 }
 
@@ -462,9 +463,10 @@ def resolve_and_play_stream(video_url, title='', artist='', duration=0, thumbnai
         mpv_proc = mpv
         state['playing']         = True
         state['paused']          = False
-        state['radio_mode']      = True
-        state['last_radio_mode'] = True
-        state['current_track']   = {
+        state['radio_mode']       = True
+        state['last_radio_mode']  = True
+        state['last_stream_mode'] = True
+        state['current_track']    = {
             'path': video_url, 'title': title or video_url,
             'artist': artist, 'album': '🎬 ストリーム再生', 'duration': duration,
         }
@@ -527,6 +529,12 @@ def stop_mpv():
         except Exception:
             mpv_proc.kill()
     mpv_proc = None
+    # 残留mpv/ffmpegプロセスを全て強制終了
+    try:
+        subprocess.run(['pkill', '-x', 'mpv'],  stderr=subprocess.DEVNULL)
+        subprocess.run(['pkill', '-x', 'ffmpeg'], stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
     state['playing'] = False
     state['paused']  = False
 
@@ -600,11 +608,12 @@ def play_radio(station):
     ]
     try:
         mpv_proc = subprocess.Popen(cmd, stderr=subprocess.DEVNULL)
-        state['playing']        = True
-        state['paused']         = False
-        state['radio_mode']     = True
-        state['last_station']   = station
-        state['last_radio_mode']= True
+        state['playing']         = True
+        state['paused']          = False
+        state['radio_mode']      = True
+        state['last_station']    = station
+        state['last_radio_mode'] = True
+        state['last_stream_mode']= False
         state['current_track']  = {
             'path':     '',
             'title':    f"📻 {station['name']}",
@@ -1744,7 +1753,10 @@ class Handler(BaseHTTPRequestHandler):
         # ── トランスポート ──
         elif p == '/api/play':
             if not state['playing']:
-                if state.get('last_radio_mode') and state.get('last_station'):
+                if state.get('last_stream_mode'):
+                    # ストリーム再生後は自動再開しない（検索から再操作してもらう）
+                    pass
+                elif state.get('last_radio_mode') and state.get('last_station'):
                     # ラジオを最後に再生 → 同じ局を再開
                     threading.Thread(
                         target=play_radio, args=(state['last_station'],), daemon=True
@@ -1767,6 +1779,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({'ok': True})
 
         elif p == '/api/stop':
+            global stop_stream_pl
             # 停止前の状態を記憶
             state['last_radio_mode'] = state.get('radio_mode', False)
             if state['playing'] and not state.get('radio_mode'):
@@ -1776,7 +1789,8 @@ class Handler(BaseHTTPRequestHandler):
                         state['last_position'] = float(v)
                 except Exception:
                     pass
-            stop_playlist = True
+            stop_playlist   = True
+            stop_stream_pl  = True
             stop_mpv()
             state['playing']       = False
             state['current_track'] = None
