@@ -515,6 +515,61 @@ def resolve_and_play_stream(video_url, title='', artist='', duration=0, thumbnai
         return None
 
 
+# ストリームプレイリスト用グローバル
+stream_pl_thread = None
+stop_stream_pl   = False
+
+
+def _stream_pl_runner(items):
+    """ストリームプレイリストを順番に再生するスレッド"""
+    global stop_stream_pl
+    stop_stream_pl = False
+    idx = 0
+
+    while not stop_stream_pl and idx < len(items):
+        item = items[idx]
+        proc = resolve_and_play_stream(
+            item['url'],
+            item.get('title', ''),
+            item.get('artist', ''),
+            item.get('duration', 0),
+            item.get('thumbnail', ''),
+        )
+        if proc is None:
+            idx += 1
+            continue
+
+        # 再生終了待ち
+        while proc.poll() is None and not stop_stream_pl:
+            if state.get('_skip_next'):
+                state['_skip_next'] = False
+                stop_mpv()
+                break
+            if state.get('_skip_prev'):
+                state['_skip_prev'] = False
+                idx = max(0, idx - 2)   # +1 されるので -2
+                stop_mpv()
+                break
+            time.sleep(0.4)
+
+        idx += 1
+
+    if not stop_stream_pl:
+        state['playing'] = False
+
+
+def start_stream_playlist(items):
+    global stream_pl_thread, stop_stream_pl
+    stop_stream_pl = True
+    if stream_pl_thread and stream_pl_thread.is_alive():
+        stream_pl_thread.join(timeout=5)
+    stop_stream_pl   = False
+    stream_pl_thread = threading.Thread(
+        target=_stream_pl_runner, args=(list(items),), daemon=True
+    )
+    stream_pl_thread.start()
+
+
 # ══════════════════════════════════════════════
 #  再生エンジン
 # ══════════════════════════════════════════════
@@ -968,7 +1023,29 @@ input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;width:22px;heig
 
   <!-- 結果リスト -->
   <div id="stream-results">
-    <div class="empty">曲名やアーティスト名で検索してください<br><span style="font-size:12px">EQ・ゲイン設定がそのまま適用されます</span></div>
+    <div class="empty">曲名やアーティスト名で検索してください<br><span style="font-size:12px">＋ボタンでプレイリストに追加できます</span></div>
+  </div>
+</div>
+
+<!-- ── プレイリストパネル（全ページ共通・ミニプレイヤーの上に重ねる） ── -->
+<div id="pl-bar" style="display:none;position:fixed;bottom:72px;left:0;right:0;z-index:190;
+  background:rgba(124,106,247,.97);padding:0 14px;border-top:1px solid rgba(255,255,255,.15)">
+
+  <!-- 折りたたみ時バー -->
+  <div id="pl-bar-collapsed" onclick="togglePlPanel()"
+    style="display:flex;align-items:center;gap:10px;padding:11px 0;cursor:pointer">
+    <span style="font-size:18px">🎵</span>
+    <span id="pl-bar-label" style="flex:1;font-size:13px;font-weight:700;color:#fff">プレイリスト 0曲</span>
+    <button onclick="event.stopPropagation();clearStreamPlaylist()"
+      style="background:rgba(255,255,255,.2);border:none;color:#fff;border-radius:7px;padding:5px 10px;font-size:12px;cursor:pointer">クリア</button>
+    <button onclick="event.stopPropagation();playStreamPlaylist()"
+      style="background:#fff;border:none;color:var(--ac);border-radius:8px;padding:7px 14px;font-size:13px;font-weight:700;cursor:pointer">▶ 再生</button>
+    <span id="pl-arrow" style="color:#fff;font-size:14px">▲</span>
+  </div>
+
+  <!-- 展開時リスト -->
+  <div id="pl-panel" style="display:none;max-height:240px;overflow-y:auto;padding-bottom:10px">
+    <div id="pl-items"></div>
   </div>
 </div>
 
@@ -1416,8 +1493,10 @@ async function rescan() {{
   alert(`✅ ${{d.count}}曲を読み込みました`);
 }}
 
-// ── ストリーム検索・再生 ──
-let streamSource = 'youtube';
+// ── ストリーム検索・再生・プレイリスト ──
+let streamSource   = 'youtube';
+let streamPlaylist = [];   // {{url,title,artist,duration,thumbnail}}
+let plPanelOpen    = false;
 
 function setStreamSource(src) {{
   streamSource = src;
@@ -1452,30 +1531,147 @@ async function searchStream() {{
       resDiv.innerHTML = '<div class="empty">結果が見つかりませんでした</div>';
       return;
     }}
-    resDiv.innerHTML = data.results.map((item, i) => {{
-      const dur = item.duration ? fmt(item.duration) : '--:--';
-      const thumb = item.thumbnail
-        ? `<img src="${{item.thumbnail}}" style="width:60px;height:44px;object-fit:cover;border-radius:7px;flex-shrink:0" loading="lazy">`
-        : `<div style="width:60px;height:44px;background:var(--sf2);border-radius:7px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:22px">🎵</div>`;
-      const itemJson = JSON.stringify(item).replace(/'/g,"&#39;");
-      return `<div class="trk" style="border-radius:11px;background:var(--sf);margin-bottom:6px"
-                onclick='playStream(${{itemJson}})'>
-        ${{thumb}}
-        <div class="ti-info">
-          <div class="ti-title">${{esc(item.title)}}</div>
-          <div class="ti-sub">${{esc(item.uploader||'')}} · ${{dur}}</div>
-        </div>
-        <button onclick="event.stopPropagation();playStream(${{itemJson}})"
-          style="background:var(--ac);border:none;color:#fff;border-radius:8px;padding:8px 12px;font-size:13px;cursor:pointer;flex-shrink:0;font-weight:700">▶</button>
-      </div>`;
-    }}).join('');
+    renderStreamResults(data.results);
   }} catch(e) {{
     resDiv.innerHTML = `<div style="color:var(--red);padding:14px;text-align:center">エラー: ${{esc(String(e))}}</div>`;
   }}
 }}
 
+// 検索結果を描画（＋ボタン付き）
+function renderStreamResults(results) {{
+  const resDiv = document.getElementById('stream-results');
+  // プレイリストに入っているURLのセット
+  const inPl = new Set(streamPlaylist.map(x => x.url));
+  resDiv.innerHTML = results.map((item) => {{
+    const dur      = item.duration ? fmt(item.duration) : '--:--';
+    const added    = inPl.has(item.url);
+    const thumb    = item.thumbnail
+      ? `<img src="${{item.thumbnail}}" style="width:60px;height:44px;object-fit:cover;border-radius:7px;flex-shrink:0" loading="lazy">`
+      : `<div style="width:60px;height:44px;background:var(--sf2);border-radius:7px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:22px">🎵</div>`;
+    const itemJson = JSON.stringify(item).replace(/\\/g,'\\\\').replace(/`/g,'\\`');
+    return `<div class="trk" style="border-radius:11px;background:var(--sf);margin-bottom:6px;gap:8px"
+              onclick='playStream(${{JSON.stringify(item)}})'>
+      ${{thumb}}
+      <div class="ti-info">
+        <div class="ti-title">${{esc(item.title)}}</div>
+        <div class="ti-sub">${{esc(item.uploader||'')}} · ${{dur}}</div>
+      </div>
+      <button id="plbtn-${{esc(item.id)}}"
+        onclick="event.stopPropagation();toggleStreamPl(${{JSON.stringify(item)}})"
+        style="background:${{added ? 'var(--grn)' : 'var(--sf2)'}};border:1.5px solid ${{added ? 'var(--grn)' : 'var(--brd)'}};
+               color:${{added ? '#fff' : 'var(--ac2)'}};border-radius:8px;
+               width:34px;height:34px;font-size:18px;cursor:pointer;flex-shrink:0;
+               display:flex;align-items:center;justify-content:center;font-weight:700;line-height:1">
+        ${{added ? '✓' : '＋'}}
+      </button>
+    </div>`;
+  }}).join('');
+}}
+
+// ＋/✓ボタン: プレイリスト追加・解除トグル
+function toggleStreamPl(item) {{
+  const idx = streamPlaylist.findIndex(x => x.url === item.url);
+  if (idx === -1) {{
+    streamPlaylist.push(item);
+  }} else {{
+    streamPlaylist.splice(idx, 1);
+  }}
+  updatePlBar();
+  // ボタン外観を更新
+  const btn = document.getElementById('plbtn-' + item.id);
+  if (btn) {{
+    const added = streamPlaylist.some(x => x.url === item.url);
+    btn.style.background    = added ? 'var(--grn)' : 'var(--sf2)';
+    btn.style.borderColor   = added ? 'var(--grn)' : 'var(--brd)';
+    btn.style.color         = added ? '#fff'       : 'var(--ac2)';
+    btn.textContent         = added ? '✓' : '＋';
+  }}
+}}
+
+// プレイリストバー更新
+function updatePlBar() {{
+  const bar = document.getElementById('pl-bar');
+  const n   = streamPlaylist.length;
+  if (n === 0) {{
+    bar.style.display = 'none';
+    return;
+  }}
+  bar.style.display = 'block';
+  document.getElementById('pl-bar-label').textContent = `プレイリスト ${{n}}曲`;
+  renderPlItems();
+}}
+
+// プレイリスト内アイテム描画
+function renderPlItems() {{
+  const el = document.getElementById('pl-items');
+  el.innerHTML = streamPlaylist.map((item, i) => {{
+    const dur = item.duration ? fmt(item.duration) : '--:--';
+    return `<div style="display:flex;align-items:center;gap:8px;padding:7px 0;
+                border-bottom:1px solid rgba(255,255,255,.1)">
+      <span style="color:rgba(255,255,255,.5);font-size:12px;width:18px;text-align:center;flex-shrink:0">${{i+1}}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;font-weight:600;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${{esc(item.title)}}</div>
+        <div style="font-size:11px;color:rgba(255,255,255,.6)">${{esc(item.uploader||'')}} · ${{dur}}</div>
+      </div>
+      <button onclick="removePlItem(${{i}})"
+        style="background:rgba(255,255,255,.15);border:none;color:#fff;border-radius:6px;
+               padding:5px 9px;font-size:13px;cursor:pointer;flex-shrink:0">✕</button>
+    </div>`;
+  }}).join('');
+}}
+
+function removePlItem(i) {{
+  const removed = streamPlaylist.splice(i, 1)[0];
+  // 検索結果のボタンも戻す
+  if (removed) {{
+    const btn = document.getElementById('plbtn-' + removed.id);
+    if (btn) {{
+      btn.style.background  = 'var(--sf2)';
+      btn.style.borderColor = 'var(--brd)';
+      btn.style.color       = 'var(--ac2)';
+      btn.textContent       = '＋';
+    }}
+  }}
+  updatePlBar();
+}}
+
+function clearStreamPlaylist() {{
+  streamPlaylist = [];
+  updatePlBar();
+  // 全ボタンをリセット
+  document.querySelectorAll('[id^="plbtn-"]').forEach(btn => {{
+    btn.style.background  = 'var(--sf2)';
+    btn.style.borderColor = 'var(--brd)';
+    btn.style.color       = 'var(--ac2)';
+    btn.textContent       = '＋';
+  }});
+}}
+
+function togglePlPanel() {{
+  plPanelOpen = !plPanelOpen;
+  document.getElementById('pl-panel').style.display = plPanelOpen ? 'block' : 'none';
+  document.getElementById('pl-arrow').textContent   = plPanelOpen ? '▼' : '▲';
+  if (plPanelOpen) renderPlItems();
+}}
+
+async function playStreamPlaylist() {{
+  if (!streamPlaylist.length) return;
+  await fetch('/api/stream/playlist/play', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{items: streamPlaylist}})
+  }});
+  // Now Playingへ移動
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('pg-now').classList.add('active');
+  document.querySelector('.tab').classList.add('active');
+  // パネルを閉じる
+  if (plPanelOpen) togglePlPanel();
+}}
+
+// 1曲だけ即再生
 async function playStream(item) {{
-  // 再生中表示にする
   document.getElementById('mini-title').textContent = item.title || '読み込み中...';
   document.getElementById('mini-sub').textContent   = item.uploader || '';
   await fetch('/api/stream/play', {{
@@ -1489,7 +1685,6 @@ async function playStream(item) {{
       thumbnail: item.thumbnail || '',
     }})
   }});
-  // Now Playing タブへ移動
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.getElementById('pg-now').classList.add('active');
@@ -1778,6 +1973,18 @@ class Handler(BaseHTTPRequestHandler):
                 args=(url, title, artist, duration, thumbnail),
                 daemon=True,
             ).start()
+            self._json({'ok': True})
+
+        # ── ストリームプレイリスト再生 ──
+        elif p == '/api/stream/playlist/play':
+            items = data.get('items', [])
+            if not items:
+                self._json({'ok': False, 'reason': 'プレイリストが空です'})
+                return
+            global stop_playlist
+            stop_playlist = True
+            stop_mpv()
+            start_stream_playlist(items)
             self._json({'ok': True})
 
         elif p == '/api/dirs/add':
