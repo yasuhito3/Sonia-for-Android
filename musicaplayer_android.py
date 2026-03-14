@@ -117,13 +117,13 @@ EQ_LABELS = {
 #  ゲインプリセット (dB)
 # ══════════════════════════════════════════════
 GAIN_PRESETS = {
-    'classical': -3,
+    'classical':  0,
     'jazz_pop':  -4,
     'loud':      -6,
     'quiet':      2,
 }
 GAIN_LABELS = {
-    'classical':'クラシック (-3dB)',
+    'classical':'クラシック (0dB)',
     'jazz_pop': 'ジャズ/ポップ (-4dB)',
     'loud':     '大音量 (-6dB)',
     'quiet':    '静音 (2dB)',
@@ -368,17 +368,9 @@ def mpv_set(prop, val):
 # ══════════════════════════════════════════════
 def build_af(eq_preset, gain_db):
     """ffmpeg -af 文字列を生成（ゲイン + EQ + 低音/高音トーン）"""
-    freqs = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
-    bands = EQ_PRESETS.get(eq_preset, EQ_PRESETS['none'])
-
-    # ── Android DAC 音割れ対策: EQ/bass/trebleの最大ブースト分を事前に引いてヘッドルーム確保 ──
-    max_eq_boost   = max((g for g in bands if g > 0), default=0)
-    bass_boost     = max(state.get('bass_db',   0), 0)
-    treble_boost   = max(state.get('treble_db', 0), 0)
-    total_boost    = max_eq_boost + bass_boost + treble_boost
-    pre_volume_db  = gain_db - total_boost  # EQ後に0dBを超えないよう先引き
-
-    filters = [f'volume={pre_volume_db:.1f}dB']
+    freqs   = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
+    bands   = EQ_PRESETS.get(eq_preset, EQ_PRESETS['none'])
+    filters = [f'volume={gain_db}dB']
     for f, g in zip(freqs, bands):
         if g != 0:
             filters.append(f'equalizer=f={f}:width_type=o:width=2:g={g}')
@@ -388,10 +380,140 @@ def build_af(eq_preset, gain_db):
     treble = state.get('treble_db', 0)
     if treble != 0:
         filters.append(f'treble=g={treble}:f=8000')
-    # ── ★ Android DAC対応リミッター: limit=0.89 (-1dBFS) でハードウェアクリップを防ぐ ──
-    # limit=0.98 (≈0dBFS) はAndroidの廉価DAC には近すぎて物理的な歪みを起こしやすい
-    filters.append('alimiter=level_in=1.0:level_out=0.89:limit=0.89:attack=5:release=50')
+    # ── ピーククリッピング防止（EQ/bass/trebleで持ち上がった音を0.98dBFSで制限）──
+    filters.append('alimiter=level_in=1.0:level_out=1.0:limit=0.98:attack=5:release=50')
     return ','.join(filters)
+
+# ══════════════════════════════════════════════
+#  ストリーム検索・再生（yt-dlp）
+# ══════════════════════════════════════════════
+import shutil as _shutil
+
+def _ytdlp_available():
+    return _shutil.which('yt-dlp') is not None
+
+
+def search_stream(query, source='youtube', max_results=8):
+    """
+    yt-dlp で YouTube / SoundCloud を検索し結果リストを返す。
+    source: 'youtube' → ytsearch  /  'soundcloud' → scsearch
+    """
+    if not _ytdlp_available():
+        return {'error': 'yt-dlp が見つかりません。pkg install yt-dlp を実行してください。'}
+
+    prefix = 'ytsearch' if source == 'youtube' else 'scsearch'
+    search_query = f'{prefix}{max_results}:{query}'
+
+    cmd = [
+        'yt-dlp',
+        '--no-playlist',
+        '--flat-playlist',
+        '-j',
+        '--no-warnings',
+        '--ignore-errors',
+        search_query,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        items = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                info = json.loads(line)
+                duration = info.get('duration') or 0
+                items.append({
+                    'id':        info.get('id', ''),
+                    'url':       info.get('url') or info.get('webpage_url', ''),
+                    'title':     info.get('title', '不明'),
+                    'uploader':  info.get('uploader') or info.get('channel', ''),
+                    'duration':  int(duration),
+                    'thumbnail': info.get('thumbnail', ''),
+                    'source':    source,
+                })
+            except Exception:
+                continue
+        return {'results': items}
+    except subprocess.TimeoutExpired:
+        return {'error': '検索タイムアウト（20秒）'}
+    except Exception as e:
+        return {'error': str(e)}
+
+
+def resolve_and_play_stream(video_url, title='', artist='', duration=0, thumbnail=''):
+    """
+    yt-dlp でストリームURLを解決して ffmpeg → mpv パイプで再生（ブロッキング）。
+    EQフィルタは通常の play_track と同じ build_af() を使用。
+    """
+    global mpv_proc
+    stop_mpv()
+
+    if not _ytdlp_available():
+        print('❌ yt-dlp が見つかりません')
+        return None
+
+    cmd_resolve = [
+        'yt-dlp',
+        '-f', 'bestaudio',
+        '--get-url',
+        '--no-warnings',
+        video_url,
+    ]
+    try:
+        r = subprocess.run(cmd_resolve, capture_output=True, text=True, timeout=15)
+        stream_url = r.stdout.strip().splitlines()[0]
+        if not stream_url:
+            print('❌ ストリームURL取得失敗')
+            return None
+    except subprocess.TimeoutExpired:
+        print('❌ yt-dlp タイムアウト')
+        return None
+    except Exception as e:
+        print(f'❌ resolve エラー: {e}')
+        return None
+
+    af = build_af(state['eq_preset'], state['gain_db'])
+
+    cmd_ff = [
+        'ffmpeg', '-hide_banner', '-loglevel', 'quiet',
+        '-i', stream_url,
+        '-af', af,
+        '-f', 'wav', '-'
+    ]
+    cmd_mpv = [
+        'mpv', '--no-video', '--really-quiet',
+        f'--input-ipc-server={MPV_SOCKET}',
+        f'--volume={state["volume"]}',
+        '--audio-buffer=0.5',
+        '-'
+    ]
+
+    try:
+        ff  = subprocess.Popen(cmd_ff,  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        mpv = subprocess.Popen(cmd_mpv, stdin=ff.stdout,        stderr=subprocess.DEVNULL)
+        ff.stdout.close()
+        mpv_proc = mpv
+
+        state['playing']        = True
+        state['paused']         = False
+        state['radio_mode']     = True
+        state['last_radio_mode']= True
+        state['current_track']  = {
+            'path':     video_url,
+            'title':    title or video_url,
+            'artist':   artist,
+            'album':    '🎬 ストリーム再生',
+            'duration': duration,
+        }
+        # サムネイルURLをカバー代わりに保存
+        state['cover_path']     = thumbnail if thumbnail else None
+
+        return mpv
+    except Exception as e:
+        print(f'❌ ストリーム再生エラー: {e}')
+        return None
+
 
 # ══════════════════════════════════════════════
 #  再生エンジン
@@ -736,6 +858,7 @@ input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;width:22px;heig
   <button class="tab active" onclick="showPage('pg-now',this)">▶ NOW</button>
   <button class="tab" onclick="showPage('pg-lib',this)">🎵 MUSIC</button>
   <button class="tab" onclick="showPage('pg-radio',this)">📻 RADIO</button>
+  <button class="tab" onclick="showPage('pg-stream',this)">📡 STREAM</button>
   <button class="tab" onclick="showPage('pg-set',this)">⚙ SET</button>
 </div>
 
@@ -816,6 +939,39 @@ input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;width:22px;heig
   <div id="radio-list"></div>
 </div>
 
+<!-- ── Stream ── -->
+<div id="pg-stream" class="page">
+  <div class="xubuntu-banner">🎶 <a href="https://sites.google.com/view/aimusicplayer-sonia/" target="_blank">Xubuntu24版へのステップアップでさらに高音質・多機能に！</a></div>
+
+  <!-- ソース選択 -->
+  <div style="display:flex;gap:8px;margin-bottom:12px">
+    <button id="btn-yt" onclick="setStreamSource('youtube')"
+      style="flex:1;padding:11px 0;border-radius:11px;border:1px solid var(--ac);background:var(--ac);color:#fff;font-size:13px;font-weight:700;cursor:pointer;transition:all .2s">
+      ▶ YouTube
+    </button>
+    <button id="btn-sc" onclick="setStreamSource('soundcloud')"
+      style="flex:1;padding:11px 0;border-radius:11px;border:1px solid var(--brd);background:var(--sf2);color:var(--tx2);font-size:13px;font-weight:700;cursor:pointer;transition:all .2s">
+      ☁ SoundCloud
+    </button>
+  </div>
+
+  <!-- 検索ボックス -->
+  <div style="display:flex;gap:8px;margin-bottom:12px">
+    <input id="stream-query" type="search" placeholder="🔍 曲名・アーティスト名..."
+      class="srch" style="margin-bottom:0;flex:1"
+      onkeydown="if(event.key==='Enter')searchStream()">
+    <button onclick="searchStream()"
+      style="padding:11px 16px;background:var(--ac);color:#fff;border:none;border-radius:11px;font-size:14px;font-weight:700;cursor:pointer;flex-shrink:0">
+      検索
+    </button>
+  </div>
+
+  <!-- 結果リスト -->
+  <div id="stream-results">
+    <div class="empty">曲名やアーティスト名で検索してください<br><span style="font-size:12px">EQ・ゲイン設定がそのまま適用されます</span></div>
+  </div>
+</div>
+
 <!-- ── Settings ── -->
 <div id="pg-set" class="page">
   <div class="xubuntu-banner">🎶 <a href="https://sites.google.com/view/aimusicplayer-sonia/" target="_blank">Xubuntu24版へのステップアップでさらに高音質・多機能に！</a></div>
@@ -880,6 +1036,7 @@ function showPage(id, btn) {{
   btn.classList.add('active');
   if (id==='pg-lib'   && allTracks.length===0) doScan();
   if (id==='pg-radio' ) renderRadio();
+  if (id==='pg-stream') {{ /* 検索は手動で行う */ }}
   if (id==='pg-set'   ) {{ fetchPresets(); fetchDirs(); document.getElementById('srv-url').textContent=location.href; }}
 }}
 
@@ -1259,6 +1416,86 @@ async function rescan() {{
   alert(`✅ ${{d.count}}曲を読み込みました`);
 }}
 
+// ── ストリーム検索・再生 ──
+let streamSource = 'youtube';
+
+function setStreamSource(src) {{
+  streamSource = src;
+  const ytBtn = document.getElementById('btn-yt');
+  const scBtn = document.getElementById('btn-sc');
+  if (src === 'youtube') {{
+    ytBtn.style.background = 'var(--ac)'; ytBtn.style.borderColor = 'var(--ac)'; ytBtn.style.color = '#fff';
+    scBtn.style.background = 'var(--sf2)'; scBtn.style.borderColor = 'var(--brd)'; scBtn.style.color = 'var(--tx2)';
+  }} else {{
+    scBtn.style.background = 'var(--ac)'; scBtn.style.borderColor = 'var(--ac)'; scBtn.style.color = '#fff';
+    ytBtn.style.background = 'var(--sf2)'; ytBtn.style.borderColor = 'var(--brd)'; ytBtn.style.color = 'var(--tx2)';
+  }}
+}}
+
+async function searchStream() {{
+  const q = document.getElementById('stream-query').value.trim();
+  if (!q) return;
+  const resDiv = document.getElementById('stream-results');
+  resDiv.innerHTML = '<div class="loading">🔍 検索中... (数秒かかります)</div>';
+  try {{
+    const r = await fetch('/api/stream/search', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{query: q, source: streamSource}})
+    }});
+    const data = await r.json();
+    if (data.error) {{
+      resDiv.innerHTML = `<div style="color:var(--red);padding:14px;text-align:center">${{esc(data.error)}}</div>`;
+      return;
+    }}
+    if (!data.results || data.results.length === 0) {{
+      resDiv.innerHTML = '<div class="empty">結果が見つかりませんでした</div>';
+      return;
+    }}
+    resDiv.innerHTML = data.results.map((item, i) => {{
+      const dur = item.duration ? fmt(item.duration) : '--:--';
+      const thumb = item.thumbnail
+        ? `<img src="${{item.thumbnail}}" style="width:60px;height:44px;object-fit:cover;border-radius:7px;flex-shrink:0" loading="lazy">`
+        : `<div style="width:60px;height:44px;background:var(--sf2);border-radius:7px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:22px">🎵</div>`;
+      const itemJson = JSON.stringify(item).replace(/'/g,"&#39;");
+      return `<div class="trk" style="border-radius:11px;background:var(--sf);margin-bottom:6px"
+                onclick='playStream(${{itemJson}})'>
+        ${{thumb}}
+        <div class="ti-info">
+          <div class="ti-title">${{esc(item.title)}}</div>
+          <div class="ti-sub">${{esc(item.uploader||'')}} · ${{dur}}</div>
+        </div>
+        <button onclick="event.stopPropagation();playStream(${{itemJson}})"
+          style="background:var(--ac);border:none;color:#fff;border-radius:8px;padding:8px 12px;font-size:13px;cursor:pointer;flex-shrink:0;font-weight:700">▶</button>
+      </div>`;
+    }}).join('');
+  }} catch(e) {{
+    resDiv.innerHTML = `<div style="color:var(--red);padding:14px;text-align:center">エラー: ${{esc(String(e))}}</div>`;
+  }}
+}}
+
+async function playStream(item) {{
+  // 再生中表示にする
+  document.getElementById('mini-title').textContent = item.title || '読み込み中...';
+  document.getElementById('mini-sub').textContent   = item.uploader || '';
+  await fetch('/api/stream/play', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{
+      url:       item.url,
+      title:     item.title,
+      artist:    item.uploader || '',
+      duration:  item.duration || 0,
+      thumbnail: item.thumbnail || '',
+    }})
+  }});
+  // Now Playing タブへ移動
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('pg-now').classList.add('active');
+  document.querySelector('.tab').classList.add('active');
+}}
+
 // ── 起動 ──
 setInterval(poll, 1500);
 poll();
@@ -1315,10 +1552,17 @@ class Handler(BaseHTTPRequestHandler):
                 v = mpv_get('time-pos')
                 if v is not None: pos = float(v)
             cv = state.get('cover_path')
+            # cover_path がURLの場合もhas_cover=Trueとして扱う
+            has_cover = bool(cv and (cv.startswith('http') or os.path.exists(cv)))
+            cover_ts  = 0
+            if cv and not cv.startswith('http') and os.path.exists(cv):
+                cover_ts = int(os.path.getmtime(cv))
+            elif cv and cv.startswith('http'):
+                cover_ts = hash(cv) & 0x7fffffff
             self._json({**state,
                 'position':  pos,
-                'has_cover': bool(cv and os.path.exists(cv)),
-                'cover_ts':  int(os.path.getmtime(cv)) if cv and os.path.exists(cv) else 0,
+                'has_cover': has_cover,
+                'cover_ts':  cover_ts,
             })
 
         elif p == '/api/tracks':
@@ -1335,7 +1579,12 @@ class Handler(BaseHTTPRequestHandler):
 
         elif p == '/api/cover':
             cv = state.get('cover_path')
-            if cv and os.path.exists(cv):
+            # ストリーム再生中はサムネイルURLへリダイレクト
+            if cv and cv.startswith('http'):
+                self.send_response(302)
+                self.send_header('Location', cv)
+                self.end_headers()
+            elif cv and os.path.exists(cv):
                 with open(cv, 'rb') as f: data = f.read()
                 self.send_response(200)
                 self.send_header('Content-Type',   'image/jpeg')
@@ -1494,6 +1743,41 @@ class Handler(BaseHTTPRequestHandler):
                 threading.Thread(
                     target=play_radio, args=(RADIO_STATIONS[idx],), daemon=True
                 ).start()
+            self._json({'ok': True})
+
+        # ── ストリーム検索 ──
+        elif p == '/api/stream/search':
+            query  = data.get('query', '').strip()
+            source = data.get('source', 'youtube')
+            if not query:
+                self._json({'error': 'クエリが空です'})
+                return
+            result_box = [None]
+            def _search():
+                result_box[0] = search_stream(query, source)
+            t = threading.Thread(target=_search, daemon=True)
+            t.start()
+            t.join(timeout=25)
+            if result_box[0] is None:
+                self._json({'error': '検索タイムアウト'})
+            else:
+                self._json(result_box[0])
+
+        # ── ストリーム再生 ──
+        elif p == '/api/stream/play':
+            url       = data.get('url', '')
+            title     = data.get('title', '')
+            artist    = data.get('artist', '')
+            duration  = int(data.get('duration', 0))
+            thumbnail = data.get('thumbnail', '')
+            if not url:
+                self._json({'ok': False, 'reason': 'URLが空です'})
+                return
+            threading.Thread(
+                target=resolve_and_play_stream,
+                args=(url, title, artist, duration, thumbnail),
+                daemon=True,
+            ).start()
             self._json({'ok': True})
 
         elif p == '/api/dirs/add':
