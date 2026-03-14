@@ -431,9 +431,12 @@ def search_stream(query, source='youtube', max_results=8):
         return {'error': str(e)}
 
 
-def resolve_and_play_stream(video_url, title='', artist='', duration=0, thumbnail=''):
+def resolve_and_play_stream(video_url, title='', artist='', duration=0, thumbnail='', _internal=False):
     global mpv_proc
-    stop_mpv()
+    if _internal:
+        stop_mpv()   # PLスレッド内: stop_stream_pl は触らない
+    else:
+        stop_all()   # 外部呼び出し: 全停止
     if not _ytdlp_available():
         print('❌ yt-dlp が見つかりません')
         return None
@@ -489,7 +492,7 @@ def _stream_pl_runner(items):
         item = items[idx]
         proc = resolve_and_play_stream(
             item['url'], item.get('title',''), item.get('artist',''),
-            item.get('duration',0), item.get('thumbnail',''))
+            item.get('duration',0), item.get('thumbnail',''), _internal=True)
         if proc is None:
             idx += 1
             continue
@@ -507,8 +510,10 @@ def _stream_pl_runner(items):
         state['playing'] = False
 
 def start_stream_playlist(items):
-    global stream_pl_thread, stop_stream_pl
+    global stream_pl_thread, stop_stream_pl, stop_playlist
+    stop_playlist  = True   # ローカルPLスレッドも停止
     stop_stream_pl = True
+    stop_mpv()
     if stream_pl_thread and stream_pl_thread.is_alive():
         stream_pl_thread.join(timeout=5)
     stop_stream_pl   = False
@@ -539,10 +544,18 @@ def stop_mpv():
     state['paused']  = False
 
 
+def stop_all():
+    """全ての再生（ローカル・ラジオ・ストリームPL）を確実に停止する"""
+    global stop_playlist, stop_stream_pl
+    stop_playlist  = True
+    stop_stream_pl = True
+    stop_mpv()
+
+
 def play_track(path):
     """ffmpeg → mpv パイプで1曲再生（ブロッキング）"""
     global mpv_proc
-    stop_mpv()
+    stop_all()
 
     af = build_af(state['eq_preset'], state['gain_db'])
 
@@ -598,7 +611,7 @@ def play_track(path):
 
 def play_radio(station):
     global mpv_proc
-    stop_mpv()
+    stop_all()
 
     cmd = [
         'mpv', '--no-video', '--really-quiet',
@@ -680,8 +693,9 @@ def restart_at_position():
 
 
 def start_playlist(playlist, index=0, seek=0):
-    global playlist_thread, stop_playlist
-    stop_playlist = True
+    global playlist_thread, stop_playlist, stop_stream_pl
+    stop_playlist  = True
+    stop_stream_pl = True   # ストリームPLも停止
     if playlist_thread and playlist_thread.is_alive():
         playlist_thread.join(timeout=4)
 
