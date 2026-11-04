@@ -41,8 +41,13 @@ import threading
 import time
 import socket
 import tempfile
+import sys
+import signal
+import struct
+import zlib
+import atexit
 from pathlib import Path
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 
 try:
@@ -88,7 +93,8 @@ SUPPORTED_EXTENSIONS = (
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp')
 PRESETS_FILE   = os.path.expanduser('~/.musica_android_presets.json')
 WEB_PORT       = 8080
-MPV_SOCKET     = '/tmp/mpvsocket_android'
+MPV_SOCKET     = os.path.join(os.path.expanduser('~'), '.musica', 'mpvsocket')
+os.makedirs(os.path.dirname(MPV_SOCKET), exist_ok=True)
 
 # ══════════════════════════════════════════════
 #  EQプリセット
@@ -397,7 +403,7 @@ def _ytdlp_available():
 
 def search_stream(query, source='youtube', max_results=8):
     if not _ytdlp_available():
-        return {'error': 'yt-dlp が見つかりません。pkg install yt-dlp を実行してください。'}
+        return {'error': 'yt-dlp が見つかりません。pip install -U yt-dlp を実行してください。'}
     prefix = 'ytsearch' if source == 'youtube' else 'scsearch'
     cmd = [
         'yt-dlp', '--no-playlist', '--flat-playlist', '-j',
@@ -431,6 +437,93 @@ def search_stream(query, source='youtube', max_results=8):
         return {'error': str(e)}
 
 
+# ── YouTube: 403になるURLを避けて、動くクライアントを自動で探す ──
+# YouTube側の仕様変更で、yt-dlpが選ぶクライアント(android_vr 等)のURLが 403 になることがある。
+_YT_TRIES = [
+    None,                                              # yt-dlp の標準
+    'youtube:player_client=default,-android_vr',      # android_vr を除外
+    'youtube:player_client=visionos',
+    'youtube:player_client=tv',
+    'youtube:player_client=ios',
+    'youtube:player_client=web',
+]
+_yt_good = None          # 最後にうまくいった設定（次回は最初に試す）
+_yt_has_js = None        # yt-dlp が --js-runtimes に対応しているか
+
+
+def _yt_supports_js_runtimes():
+    global _yt_has_js
+    if _yt_has_js is None:
+        try:
+            h = subprocess.run(['yt-dlp', '--help'], capture_output=True, text=True, timeout=20).stdout
+            _yt_has_js = ('--js-runtimes' in h) and bool(shutil.which('node'))
+        except Exception:
+            _yt_has_js = False
+    return _yt_has_js
+
+
+def _probe_url(url, headers):
+    """そのURLが実際に再生できるか（先頭2バイトだけ取得）"""
+    import urllib.request
+    try:
+        req = urllib.request.Request(url, headers={**headers, 'Range': 'bytes=0-1'})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return r.status in (200, 206)
+    except Exception as e:
+        print(f'   ↳ URL確認: {e}')
+        return False
+
+
+def _ff_http_opts(headers):
+    """yt-dlpが使ったUser-Agent等を ffmpeg にも渡す"""
+    if not headers:
+        return []
+    opts = []
+    ua = headers.get('User-Agent')
+    if ua:
+        opts += ['-user_agent', ua]
+    rest = ''.join(f'{k}: {v}\r\n' for k, v in headers.items()
+                   if k.lower() not in ('user-agent', 'range'))
+    if rest:
+        opts += ['-headers', rest]
+    return opts
+
+
+def _resolve_stream_url(video_url):
+    """音声のURLと必要ヘッダーを返す。(url, headers) / 失敗時は (None, {})"""
+    global _yt_good
+    is_yt = ('youtube.com' in video_url) or ('youtu.be' in video_url)
+    tries = list(_YT_TRIES) if is_yt else [None]
+    if is_yt and _yt_good in tries:
+        tries.remove(_yt_good)
+        tries.insert(0, _yt_good)
+    for ea in tries:
+        cmd = ['yt-dlp', '-f', 'bestaudio', '-j', '--no-playlist', '--no-warnings']
+        if is_yt and _yt_supports_js_runtimes():
+            cmd += ['--js-runtimes', 'node']
+        if ea:
+            cmd += ['--extractor-args', ea]
+        cmd.append(video_url)
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            info = json.loads(r.stdout.strip().splitlines()[0])
+            url = info.get('url') or (info.get('requested_formats') or [{}])[0].get('url')
+            headers = info.get('http_headers') or {}
+        except Exception as e:
+            print(f'   ↳ yt-dlp ({ea or "標準"}) 失敗: {e}')
+            continue
+        if not url:
+            continue
+        if not is_yt:
+            return url, {}
+        if _probe_url(url, headers):
+            _yt_good = ea
+            print(f'🎬 YouTube: {ea or "標準"} で取得OK')
+            return url, headers
+        print(f'   ↳ {ea or "標準"} のURLは拒否されました。別の方法を試します…')
+    return None, {}
+
+
 def resolve_and_play_stream(video_url, title='', artist='', duration=0, thumbnail='', _internal=False):
     global mpv_proc
     if _internal:
@@ -440,29 +533,24 @@ def resolve_and_play_stream(video_url, title='', artist='', duration=0, thumbnai
     if not _ytdlp_available():
         print('❌ yt-dlp が見つかりません')
         return None
-    try:
-        r = subprocess.run(
-            ['yt-dlp', '-f', 'bestaudio', '--get-url', '--no-warnings', video_url],
-            capture_output=True, text=True, timeout=15
-        )
-        stream_url = r.stdout.strip().splitlines()[0]
-        if not stream_url:
-            return None
-    except Exception as e:
-        print(f'❌ resolve エラー: {e}')
+    stream_url, stream_headers = _resolve_stream_url(video_url)
+    if not stream_url:
+        print('❌ 音声URLを取得できませんでした。yt-dlp の更新を試してください: pip install -U yt-dlp')
         return None
 
     af = build_af(state['eq_preset'], state['gain_db'])
     try:
         ff  = subprocess.Popen(
-            ['ffmpeg', '-hide_banner', '-loglevel', 'quiet', '-i', stream_url, '-af', af, '-f', 'wav', '-'],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            ['ffmpeg', '-hide_banner', '-loglevel', 'error'] + _ff_http_opts(stream_headers)
+            + ['-i', stream_url, '-af', af, '-f', 'wav', '-'],
+            stdout=subprocess.PIPE, stderr=sys.stderr)
         mpv = subprocess.Popen(
-            ['mpv', '--no-video', '--really-quiet',
+            ['mpv', '--no-video', '--msg-level=all=error',
              f'--input-ipc-server={MPV_SOCKET}',
              f'--volume={state["volume"]}', '--audio-buffer=0.5', '-'],
-            stdin=ff.stdout, stderr=subprocess.DEVNULL)
+            stdin=ff.stdout, stderr=sys.stderr)
         ff.stdout.close()
+        _health_check(ff, mpv, 'play')
         mpv_proc = mpv
         state['playing']         = True
         state['paused']          = False
@@ -523,6 +611,37 @@ def start_stream_playlist(items):
 # ══════════════════════════════════════════════
 #  再生エンジン
 # ══════════════════════════════════════════════
+def _health_check(ff, mpv, label):
+    """再生開始の3秒後に、mpv/ffmpegが生きているか確認してログに残す"""
+    def run():
+        time.sleep(3)
+        try:
+            if mpv.poll() is not None:
+                print(f'⚠ [{label}] mpv が終了しました (code {mpv.returncode}) — 音声出力か入力の問題の可能性')
+            elif ff is not None and ff.poll() not in (None, 0):
+                print(f'⚠ [{label}] ffmpeg が終了しました (code {ff.returncode}) — 入力URL/ファイルの問題の可能性')
+        except Exception:
+            pass
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _kill_name(name):
+    """pkill が無い環境（Termux標準）でも、同名プロセスを終了する"""
+    if shutil.which('pkill'):
+        subprocess.run(['pkill', '-x', name], stderr=subprocess.DEVNULL)
+        return
+    me = os.getpid()
+    for pid in os.listdir('/proc'):
+        if not pid.isdigit() or int(pid) == me:
+            continue
+        try:
+            with open(f'/proc/{pid}/comm') as fh:
+                if fh.read().strip() == name:
+                    os.kill(int(pid), 9)
+        except Exception:
+            pass
+
+
 def stop_mpv():
     global mpv_proc
     mpv_send(['quit'])
@@ -536,8 +655,8 @@ def stop_mpv():
     mpv_proc = None
     # 残留mpv/ffmpegプロセスを全て強制終了
     try:
-        subprocess.run(['pkill', '-x', 'mpv'],  stderr=subprocess.DEVNULL)
-        subprocess.run(['pkill', '-x', 'ffmpeg'], stderr=subprocess.DEVNULL)
+        _kill_name('mpv')
+        _kill_name('ffmpeg')
     except Exception:
         pass
     state['playing'] = False
@@ -560,13 +679,13 @@ def play_track(path):
     af = build_af(state['eq_preset'], state['gain_db'])
 
     cmd_ff = [
-        'ffmpeg', '-hide_banner', '-loglevel', 'quiet',
+        'ffmpeg', '-hide_banner', '-loglevel', 'error',
         '-i', path,
         '-af', af,
         '-f', 'wav', '-'
     ]
     cmd_mpv = [
-        'mpv', '--no-video', '--really-quiet',
+        'mpv', '--no-video', '--msg-level=all=error',
         f'--input-ipc-server={MPV_SOCKET}',
         f'--volume={state["volume"]}',
         '--audio-buffer=0.2',
@@ -574,9 +693,10 @@ def play_track(path):
     ]
 
     try:
-        ff  = subprocess.Popen(cmd_ff,  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        mpv = subprocess.Popen(cmd_mpv, stdin=ff.stdout,        stderr=subprocess.DEVNULL)
+        ff  = subprocess.Popen(cmd_ff,  stdout=subprocess.PIPE, stderr=sys.stderr)
+        mpv = subprocess.Popen(cmd_mpv, stdin=ff.stdout,        stderr=sys.stderr)
         ff.stdout.close()
+        _health_check(ff, mpv, 'play')
         mpv_proc = mpv
 
         meta = get_metadata(path)
@@ -614,13 +734,14 @@ def play_radio(station):
     stop_all()
 
     cmd = [
-        'mpv', '--no-video', '--really-quiet',
+        'mpv', '--no-video', '--msg-level=all=error',
         f'--input-ipc-server={MPV_SOCKET}',
         f'--volume={state["volume"]}',
         station['url']
     ]
     try:
-        mpv_proc = subprocess.Popen(cmd, stderr=subprocess.DEVNULL)
+        mpv_proc = subprocess.Popen(cmd, stderr=sys.stderr)
+        _health_check(None, mpv_proc, 'radio')
         state['playing']         = True
         state['paused']          = False
         state['radio_mode']      = True
@@ -726,6 +847,243 @@ def save_presets(data):
 # ══════════════════════════════════════════════
 #  Web UI HTML（スマホ最適化）
 # ══════════════════════════════════════════════
+# ══════════════════════════════════════════════
+#  アプリ化 (PWA)・アイコン・省電力・起動高速化
+# ══════════════════════════════════════════════
+APP_NAME    = 'Sonia'
+APP_DIR     = os.path.join(os.path.expanduser('~'), '.musica')
+_icon_cache = {}
+_scan_lock  = threading.Lock()
+PID_FILE    = os.path.join(APP_DIR, 'sonia.pid')
+LOG_FILE    = os.path.join(APP_DIR, 'sonia.log')
+
+
+class _Tee:
+    """画面とログファイル(~/.musica/sonia.log)の両方に出力する"""
+    def __init__(self, *streams):
+        self.streams = streams
+    def write(self, x):
+        for f in self.streams:
+            try:
+                f.write(x); f.flush()
+            except Exception:
+                pass
+        return len(x)
+    def flush(self):
+        pass
+    def isatty(self):
+        return False
+    def fileno(self):
+        return self.streams[0].fileno()
+
+
+def _cleanup_pid():
+    try:
+        if open(PID_FILE).read().strip() == str(os.getpid()):
+            os.remove(PID_FILE)
+    except Exception:
+        pass
+
+
+def _setup_runtime_files():
+    os.makedirs(APP_DIR, exist_ok=True)
+    try:
+        lf = open(LOG_FILE, 'w', encoding='utf-8')
+        sys.stdout = _Tee(sys.stdout, lf)
+        sys.stderr = _Tee(sys.stderr, lf)
+    except Exception:
+        pass
+    with open(PID_FILE, 'w') as fh:
+        fh.write(str(os.getpid()))
+    atexit.register(_cleanup_pid)
+
+scan_progress = {'scanning': False, 'done': 0, 'total': 0}
+
+
+def _make_icon_png(size):
+    """イコライザー柄のアプリアイコン(PNG)を標準ライブラリだけで生成する"""
+    import math
+    c1, c2 = (124, 106, 247), (22, 16, 64)          # 左上: 紫 → 右下: 濃紺
+    S = float(size)
+    bw, gap = 0.056 * S, 0.030 * S
+    x0 = (S - (5 * bw + 4 * gap)) / 2 + bw / 2
+    bars = []
+    for i, h in enumerate((0.22, 0.36, 0.50, 0.30, 0.42)):
+        half, r = h * S / 2, bw / 2
+        bars.append((x0 + i * (bw + gap), S / 2 - (half - r), S / 2 + (half - r), r))
+    ymin, ymax = int(S * 0.22), int(S * 0.78) + 1
+    xmin, xmax = int(x0 - bw), int(x0 + 4 * (bw + gap) + bw) + 1
+    rows = []
+    for y in range(size):
+        row = bytearray(b'\x00')
+        for x in range(size):
+            t  = (x + y) / (2.0 * (size - 1))
+            rr = c1[0] + (c2[0] - c1[0]) * t
+            gg = c1[1] + (c2[1] - c1[1]) * t
+            bb = c1[2] + (c2[2] - c1[2]) * t
+            if ymin <= y <= ymax and xmin <= x <= xmax:
+                px, py, cov = x + 0.5, y + 0.5, 0.0
+                for cx, ya, yb, r in bars:
+                    qy = ya if py < ya else (yb if py > yb else py)
+                    a  = 0.5 - (math.hypot(px - cx, py - qy) - r)
+                    if a > cov:
+                        cov = a if a < 1.0 else 1.0
+                if cov > 0:
+                    rr += (255 - rr) * cov
+                    gg += (255 - gg) * cov
+                    bb += (255 - bb) * cov
+            row += bytes((int(rr), int(gg), int(bb)))
+        rows.append(bytes(row))
+
+    def chunk(tag, data):
+        return (struct.pack('>I', len(data)) + tag + data
+                + struct.pack('>I', zlib.crc32(tag + data) & 0xffffffff))
+
+    return (b'\x89PNG\r\n\x1a\n'
+            + chunk(b'IHDR', struct.pack('>IIBBBBB', size, size, 8, 2, 0, 0, 0))
+            + chunk(b'IDAT', zlib.compress(b''.join(rows), 9))
+            + chunk(b'IEND', b''))
+
+
+def get_icon_png(size):
+    """アイコンを返す（初回だけ生成して ~/.musica/icons に保存）"""
+    if size in _icon_cache:
+        return _icon_cache[size]
+    f = os.path.join(APP_DIR, 'icons', f'sonia-{size}.png')
+    try:
+        with open(f, 'rb') as fh:
+            data = fh.read()
+        if data[:8] == b'\x89PNG\r\n\x1a\n':
+            _icon_cache[size] = data
+            return data
+    except OSError:
+        pass
+    data = _make_icon_png(size)
+    try:
+        os.makedirs(os.path.dirname(f), exist_ok=True)
+        with open(f, 'wb') as fh:
+            fh.write(data)
+    except OSError:
+        pass
+    _icon_cache[size] = data
+    return data
+
+
+MANIFEST = {
+    'name':             f'{APP_NAME} 奏在',
+    'short_name':       APP_NAME,
+    'description':      'ハイレゾ志向のモバイル音楽プレイヤー',
+    'lang':             'ja',
+    'start_url':        '/',
+    'scope':            '/',
+    'display':          'standalone',
+    'orientation':      'portrait',
+    'background_color': '#0d0d12',
+    'theme_color':      '#0d0d12',
+    'icons': [
+        {'src': '/icon-192.png', 'sizes': '192x192', 'type': 'image/png', 'purpose': 'any maskable'},
+        {'src': '/icon-512.png', 'sizes': '512x512', 'type': 'image/png', 'purpose': 'any maskable'},
+    ],
+}
+
+# Service Worker: ページ移動(navigate)だけを見張り、サーバー停止中は
+# 「眠っています」画面を出して、復帰したら自動で再接続する。API通信には触れない。
+SW_JS = r'''
+const OFFLINE = `<!doctype html><html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0d0d12"><title>Sonia</title>
+<style>
+body{margin:0;background:#0d0d12;color:#eeeef5;font-family:-apple-system,BlinkMacSystemFont,sans-serif;
+display:flex;min-height:100vh;align-items:center;justify-content:center;text-align:center;padding:24px;box-sizing:border-box}
+.b{max-width:340px;line-height:1.9}.i{font-size:56px;animation:p 2.4s ease-in-out infinite}
+@keyframes p{50%{transform:scale(1.12);opacity:.7}}h1{font-size:19px;margin:10px 0 4px}
+p{color:#888899;font-size:13.5px;margin:6px 0}.s{color:#a78bfa;font-size:12px;margin-top:18px}
+button{margin-top:18px;background:#7c6af7;color:#fff;border:none;border-radius:13px;padding:12px 26px;font-size:14px;font-weight:700}
+</style></head><body><div class="b"><div class="i">🎵</div>
+<h1>Sonia はお休み中です</h1>
+<p>ホーム画面の <b>Sonia ショートカット</b>（Termux）をタップして起こしてあげてください。</p>
+<p>起動すると、この画面は自動でつながります。</p>
+<div class="s" id="s">接続を待っています…</div>
+<button onclick="location.reload()">もう一度つなぐ</button></div>
+<script>setInterval(function(){fetch('/api/status',{cache:'no-store'}).then(function(r){if(r.ok)location.reload()}).catch(function(){})},2500)</script>
+</body></html>`;
+self.addEventListener('install', e => self.skipWaiting());
+self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
+self.addEventListener('fetch', e => {
+  if (e.request.mode === 'navigate') {
+    e.respondWith(fetch(e.request).catch(() =>
+      new Response(OFFLINE, {headers: {'Content-Type': 'text/html; charset=utf-8'}})));
+  }
+});
+'''
+
+
+def _wakelock(on):
+    """Termuxのウェイクロック。再生中だけ CPU を起こしておく（画面OFFでも止まらない）"""
+    exe = shutil.which('termux-wake-lock' if on else 'termux-wake-unlock')
+    if not exe:
+        return
+    try:
+        subprocess.run([exe], timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+def _wakelock_watcher():
+    """再生中はロック取得、止まって90秒たったら解放 → 待機中の電池消費を抑える"""
+    held, idle_since = False, time.time()
+    while True:
+        time.sleep(5)
+        try:
+            playing = bool(state.get('playing'))
+        except Exception:
+            playing = False
+        if playing:
+            idle_since = time.time()
+            if not held:
+                _wakelock(True)
+                held = True
+        elif held and time.time() - idle_since > 90:
+            _wakelock(False)
+            held = False
+
+
+def _initial_scan():
+    """起動直後の曲スキャン。サーバーを先に立ち上げ、裏で読み込む（アイコンを押してすぐ使える）"""
+    with _scan_lock:
+        _initial_scan_body()
+
+
+def _scan_and_load(verbose=False):
+    scan_progress.update(scanning=True, done=0, total=0)
+    try:
+        tracks = scan_music()
+        scan_progress['total'] = len(tracks)
+        if verbose and tracks:
+            print(f'   {len(tracks)}曲を発見 — メタデータ読み込み中...')
+        for i, t in enumerate(tracks):
+            get_metadata(t)
+            scan_progress['done'] = i + 1
+            if verbose and (i + 1) % 100 == 0:
+                print(f'   {i + 1}/{len(tracks)} 完了')
+        with _db_lock:
+            state['playlist'] = list(track_db.keys())
+        return tracks
+    finally:
+        scan_progress['scanning'] = False
+
+
+def _initial_scan_body():
+    print('\n📂 音楽ライブラリをスキャン中...')
+    tracks = _scan_and_load(verbose=True)
+    if tracks:
+        print(f'✅  {len(tracks)}曲の読み込み完了\n')
+    else:
+        print('⚠   曲が見つかりませんでした')
+        print('    ⚠ termux-setup-storage を実行しましたか？')
+        print('    実行済みなら ~/storage/ 以下にフォルダがあるはずです\n')
+
+
 def build_html():
     radio_json = json.dumps(RADIO_STATIONS, ensure_ascii=False)
     eq_json    = json.dumps(EQ_LABELS,      ensure_ascii=False)
@@ -737,8 +1095,12 @@ def build_html():
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0d0d12">
-<title>Musica Player</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/png" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<title>{APP_NAME}</title>
 <style>
 :root{{
   --bg:#0d0d12; --sf:#17171f; --sf2:#22222e; --ac:#7c6af7; --ac2:#a78bfa;
@@ -1024,6 +1386,13 @@ input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;width:22px;heig
   </div>
   <button class="btn-full" onclick="rescan()">📂 再スキャン実行</button>
 
+  <div class="sec" style="margin-top:24px">📲 アプリとして使う</div>
+  <div style="background:var(--sf);border-radius:13px;padding:14px;font-size:13px;line-height:1.8;color:var(--tx2);margin-bottom:10px">
+    <div id="install-txt" style="margin-bottom:10px">ホーム画面にアイコンを追加すると、ブラウザの枠なしで<b>アプリのように</b>起動できます。</div>
+    <button class="btn-full" id="btn-install" onclick="installApp()" style="margin-bottom:0">📲 ホーム画面に追加</button>
+  </div>
+  <button class="btn-full ghost" onclick="quitServer()" style="color:var(--red)">⏻ Sonia を終了（バッテリー節約）</button>
+
   <div class="sec" style="margin-top:24px">接続情報</div>
   <div style="background:var(--sf);border-radius:13px;padding:14px;font-size:13px;line-height:2;color:var(--tx2)">
     <div>🌐 このサーバー: <span style="color:var(--ac2)" id="srv-url"></span></div>
@@ -1057,6 +1426,30 @@ let st        = {{}};
 let chipsReady = false;
 let coverTs    = 0;
 
+// ── アプリ化 (PWA) ──
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{{}});
+let _installEv = null;
+window.addEventListener('beforeinstallprompt', e => {{ e.preventDefault(); _installEv = e; }});
+window.addEventListener('appinstalled', () => {{ _installEv = null; initAppCard(); }});
+function isStandalone() {{ return matchMedia('(display-mode: standalone)').matches || navigator.standalone === true; }}
+function initAppCard() {{
+  const b = document.getElementById('btn-install'), t = document.getElementById('install-txt');
+  if (!b || !t) return;
+  const on = isStandalone();
+  b.style.display = on ? 'none' : '';
+  t.innerHTML = on ? '✅ アプリとして起動中です'
+                   : 'ホーム画面にアイコンを追加すると、ブラウザの枠なしで<b>アプリのように</b>起動できます。';
+}}
+async function installApp() {{
+  if (_installEv) {{ _installEv.prompt(); try {{ await _installEv.userChoice; }} catch(e) {{}} _installEv = null; return; }}
+  alert('ブラウザのメニュー（⋮）から「ホーム画面に追加」または「アプリをインストール」を選んでください。');
+}}
+async function quitServer() {{
+  if (!confirm('Sonia を終了しますか？ 再開するにはホーム画面の Sonia ショートカットをタップします。')) return;
+  try {{ await fetch('/api/shutdown', {{method:'POST', headers:{{'X-Sonia':'1'}}}}); }} catch(e) {{}}
+  document.body.innerHTML = '<div style="text-align:center;padding:90px 24px;color:#888899;font-size:15px;line-height:2">👋<br>Sonia を終了しました<br><span style="font-size:12px">またのご利用をお待ちしています</span></div>';
+}}
+
 // ── ページ切替 ──
 function showPage(id, btn) {{
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -1065,7 +1458,7 @@ function showPage(id, btn) {{
   btn.classList.add('active');
   if (id==='pg-lib'   && allTracks.length===0) doScan();
   if (id==='pg-radio' ) renderRadio();
-  if (id==='pg-set'   ) {{ fetchPresets(); fetchDirs(); document.getElementById('srv-url').textContent=location.href; }}
+  if (id==='pg-set'   ) {{ fetchPresets(); fetchDirs(); document.getElementById('srv-url').textContent=location.href; initAppCard(); }}
 }}
 
 // ── 時間フォーマット ──
@@ -1207,9 +1600,16 @@ document.getElementById('prog-bar').addEventListener('click', e => {{
 
 // ── ライブラリ ──
 async function doScan() {{
-  document.getElementById('trk-list').innerHTML='<div class="loading">📂 スキャン中... しばらくお待ちください</div>';
-  const r=await fetch('/api/scan',{{method:'POST'}});
-  const d=await r.json();
+  const el=document.getElementById('trk-list');
+  el.innerHTML='<div class="loading">📂 スキャン中... しばらくお待ちください</div>';
+  const tm=setInterval(async()=>{{
+    try {{
+      const s=(await (await fetch('/api/status')).json()).scan||{{}};
+      el.innerHTML='<div class="loading">📂 '+(s.total?('曲を読み込み中... '+s.done+' / '+s.total):'音楽フォルダを探しています...')+'</div>';
+    }} catch(e) {{}}
+  }},1500);
+  try {{ const r=await fetch('/api/scan',{{method:'POST'}}); await r.json(); }}
+  finally {{ clearInterval(tm); }}
   await fetchTracks();
 }}
 
@@ -1637,6 +2037,16 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _bytes(self, body, ctype, cache=False, extra=None):
+        self.send_response(200)
+        self.send_header('Content-Type',   ctype)
+        self.send_header('Content-Length', len(body))
+        self.send_header('Cache-Control',  'public, max-age=86400' if cache else 'no-cache')
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
     def _html(self, html):
         body = html.encode('utf-8')
         self.send_response(200)
@@ -1662,6 +2072,17 @@ class Handler(BaseHTTPRequestHandler):
         if p == '/':
             self._html(HTML)
 
+        elif p == '/manifest.webmanifest':
+            self._bytes(json.dumps(MANIFEST, ensure_ascii=False).encode('utf-8'),
+                        'application/manifest+json; charset=utf-8')
+
+        elif p == '/sw.js':
+            self._bytes(SW_JS.encode('utf-8'), 'application/javascript; charset=utf-8',
+                        extra={'Service-Worker-Allowed': '/'})
+
+        elif p in ('/icon-192.png', '/icon-512.png'):
+            self._bytes(get_icon_png(192 if '192' in p else 512), 'image/png', cache=True)
+
         elif p == '/api/status':
             pos = 0.0
             if state['playing'] and not state['radio_mode']:
@@ -1675,6 +2096,7 @@ class Handler(BaseHTTPRequestHandler):
                 'position':  pos,
                 'has_cover': has_cover,
                 'cover_ts':  cover_ts,
+                'scan':      dict(scan_progress),
             })
 
         elif p == '/api/tracks':
@@ -1738,15 +2160,22 @@ class Handler(BaseHTTPRequestHandler):
         p    = urlparse(self.path).path
         data = self._body()
 
+        # ── 終了（本体からのみ。他サイトからの誤爆防止に専用ヘッダー必須）──
+        if p == '/api/shutdown':
+            if self.client_address[0] not in ('127.0.0.1', '::1') or self.headers.get('X-Sonia') != '1':
+                self._json({'error': 'forbidden'}, 403)
+                return
+            self._json({'ok': True})
+            threading.Timer(0.4, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()
+            return
+
         # ── スキャン ──
         if p == '/api/scan':
             # スキャン前にMUSIC_DIRSを再構築（起動後にストレージ権限が付いた場合も対応）
             global MUSIC_DIRS
-            MUSIC_DIRS = _find_all_music_dirs()
-            tracks = scan_music()
-            for t in tracks: get_metadata(t)
-            with _db_lock:
-                state['playlist'] = list(track_db.keys())
+            with _scan_lock:   # 起動時スキャン中なら、終わるのを待つ（同じ作業を二重にやらない）
+                MUSIC_DIRS = _find_all_music_dirs()
+                tracks = _scan_and_load()
             self._json({'count': len(tracks), 'dirs': MUSIC_DIRS})
 
         # ── 再生 ──
@@ -1961,33 +2390,31 @@ def get_local_ip():
 
 
 def main():
+    # アイコンだけ作って終了: python musicaplayer_android.py --make-icons <出力フォルダ>
+    if len(sys.argv) >= 3 and sys.argv[1] == '--make-icons':
+        out = os.path.expanduser(sys.argv[2])
+        os.makedirs(out, exist_ok=True)
+        for s in (192, 512):
+            with open(os.path.join(out, f'sonia-{s}.png'), 'wb') as fh:
+                fh.write(get_icon_png(s))
+        print(f'icons -> {out}')
+        return
+
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+    _setup_runtime_files()
     print('═' * 58)
-    print('🎵  Musica Player  Android版 (Termux)')
+    print(f'🎵  {APP_NAME}  Android版 (Termux)')
     print('═' * 58)
 
     # ffmpeg / mpv チェック
-    for cmd in ['ffmpeg', 'mpv']:
+    for cmd in ['ffmpeg', 'mpv', 'yt-dlp']:
         if not shutil.which(cmd):
             print(f'❌  {cmd} が見つかりません')
-            print(f'   → pkg install {cmd}')
-
-    # 初回スキャン
-    print('\n📂 音楽ライブラリをスキャン中...')
-    tracks = scan_music()
-    if tracks:
-        print(f'   {len(tracks)}曲を発見 — メタデータ読み込み中...')
-        for i, t in enumerate(tracks):
-            get_metadata(t)
-            if (i + 1) % 100 == 0:
-                print(f'   {i + 1}/{len(tracks)} 完了')
-        with _db_lock:
-            state['playlist'] = list(track_db.keys())
-        print(f'✅  {len(tracks)}曲の読み込み完了\n')
-    else:
-        print('⚠   曲が見つかりませんでした')
-        print("    ⚠ termux-setup-storage を実行しましたか？")
-    print("    実行済みなら ~/storage/ 以下にフォルダがあるはずです")
-    print("    Termuxで: ls ~/storage/  で確認してください\n")
+            print('   → pip install -U yt-dlp' if cmd == 'yt-dlp' else f'   → pkg install {cmd}')
 
     ip = get_local_ip()
     print(f'🌐  Webサーバー起動')
@@ -1996,7 +2423,9 @@ def main():
     print(f'\n    Ctrl+C で終了')
     print('═' * 58)
 
-    server = HTTPServer(('0.0.0.0', WEB_PORT), Handler)
+    # 並列処理サーバー: スキャンやストリーム検索の最中でも、他の操作が固まらない
+    ThreadingHTTPServer.daemon_threads = True
+    server = ThreadingHTTPServer(('0.0.0.0', WEB_PORT), Handler)
     server.timeout = 1.0  # serve_foreverのループ間隔
 
     import signal, sys as _sys
@@ -2006,6 +2435,7 @@ def main():
         print("\n👋 終了処理中...")
         # 1. mpv停止
         stop_mpv()
+        _wakelock(False)
         # 2. プレイリストスレッド停止
         global stop_playlist
         stop_playlist = True
@@ -2033,6 +2463,10 @@ def main():
         exists = "✅" if os.path.isdir(d) else "❌"
         print(f"   {exists} {d}")
     print()
+
+    # サーバーを先に立ち上げ、曲スキャンと省電力ウォッチャーは裏で動かす
+    threading.Thread(target=_initial_scan,      daemon=True).start()
+    threading.Thread(target=_wakelock_watcher,  daemon=True).start()
 
     try:
         server.serve_forever()

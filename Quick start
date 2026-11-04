@@ -1,28 +1,52 @@
-Quick start
+🎵 Sonia for Android — Quick start (English)
+===========================================
 
-Install F Droid
-https://f-droid.org/packages/com.termux/
+Tap an icon on your home screen, and your music is ready.
 
-then, install Termux and Termux:wedget
+STEP 1 — Install the apps (one time)
+  From F-Droid (https://f-droid.org/packages/com.termux/), install:
+    - Termux          (required)
+    - Termux:Widget   (recommended: home-screen shortcut)
+  Tip: install ALL Termux apps from F-Droid. Do not mix them with Google Play versions.
 
-then, copy-paste and enter in Termux:
-curl -sL https://raw.githubusercontent.com/yasuhito3/Sonia-for-Android/main/install.sh | bash
+STEP 2 — Install Sonia (copy, paste, Enter in Termux)
 
+  curl -sL https://raw.githubusercontent.com/yasuhito3/Sonia-for-Android/main/install.sh | bash
 
+  Allow storage access when Android asks. Sonia opens automatically when it's done.
 
-if you want to make a wedget, install Termux:wedget, then copy-paste in termux and enter
+STEP 3 — Put the icon on your home screen
+  In Chrome (where Sonia just opened):
+    Menu (⋮) -> "Install app"  (or "Add to Home screen")
+  You can also do it from Sonia's SET tab -> "Add to Home screen".
 
+DAILY USE
+  Sonia runs inside Termux's screen; the browser is just its remote panel.
+  1. Tap the "Sonia" Termux:Widget shortcut (or type `musica` in Termux).
+     The browser opens by itself in a few seconds.
+  2. Pick a song (MUSIC / RADIO / STREAM).
+  3. Press Home — music keeps playing. Leave Termux alone; do NOT swipe it away
+     from "recent apps" (that stops Sonia too).
+  4. To quit: SET tab -> "Quit Sonia".
 
+IF YOU SEE "Sonia is resting"
+  Sonia isn't running. Tap the Termux:Widget "Sonia" shortcut
+  (long-press home screen -> Widgets -> Termux:Widget -> choose "Sonia").
+  The page reconnects automatically.
 
-mkdir -p ~/.shortcuts
-cat > ~/.shortcuts/Musica << 'EOF'
-#!/data/data/com.termux/files/usr/bin/bash
-musica
-EOF
-chmod +x ~/.shortcuts/Musica
+COMMANDS (in Termux)
+  musica                    start and open in the browser
+  musica stop               quit (from another Termux session)
+  musica status             is it running?
+  musica update             update to the latest version
+  musica autostart on|off   experimental: start at boot (may be stopped by Android)
+  musica log                show the log
 
-then
+TROUBLESHOOTING
+  - No songs?          Run `termux-setup-storage`, put files in /sdcard/Music, then SET -> Rescan.
+  - Music stops when the screen is off?
+                       Android Settings -> Apps -> Termux -> Battery -> "Unrestricted".
+  - No "Install app"?  Open http://localhost:8080 in Chrome (not via an IP address).
+    "Add to Home screen" in the menu works too.
 
-Long-press on Android-Screen and add a Termux:wedget
-
-end//
+end //
