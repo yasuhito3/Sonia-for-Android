@@ -542,12 +542,14 @@ def resolve_and_play_stream(video_url, title='', artist='', duration=0, thumbnai
     try:
         ff  = subprocess.Popen(
             ['ffmpeg', '-hide_banner', '-loglevel', 'error'] + _ff_http_opts(stream_headers)
+            + ['-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5']
             + ['-i', stream_url, '-af', af, '-f', 'wav', '-'],
             stdout=subprocess.PIPE, stderr=sys.stderr)
+        enlarge_pipe(ff.stdout)
         mpv = subprocess.Popen(
             ['mpv', '--no-video', '--msg-level=all=error',
              f'--input-ipc-server={MPV_SOCKET}',
-             f'--volume={state["volume"]}', '--audio-buffer=0.5', '-'],
+             f'--volume={state["volume"]}', *mpv_buffer_args(), '-'],
             stdin=ff.stdout, stderr=sys.stderr)
         ff.stdout.close()
         _health_check(ff, mpv, 'play')
@@ -688,12 +690,13 @@ def play_track(path):
         'mpv', '--no-video', '--msg-level=all=error',
         f'--input-ipc-server={MPV_SOCKET}',
         f'--volume={state["volume"]}',
-        '--audio-buffer=0.2',
+        *mpv_buffer_args(),
         '-'
     ]
 
     try:
         ff  = subprocess.Popen(cmd_ff,  stdout=subprocess.PIPE, stderr=sys.stderr)
+        enlarge_pipe(ff.stdout)
         mpv = subprocess.Popen(cmd_mpv, stdin=ff.stdout,        stderr=sys.stderr)
         ff.stdout.close()
         _health_check(ff, mpv, 'play')
@@ -737,6 +740,7 @@ def play_radio(station):
         'mpv', '--no-video', '--msg-level=all=error',
         f'--input-ipc-server={MPV_SOCKET}',
         f'--volume={state["volume"]}',
+        *mpv_buffer_args(), '--cache-pause-wait=3',
         station['url']
     ]
     try:
@@ -1084,6 +1088,78 @@ def _initial_scan_body():
         print('    実行済みなら ~/storage/ 以下にフォルダがあるはずです\n')
 
 
+# ── 音飛び対策: 先読みバッファ ──
+# レベル: (mpv音声バッファ秒, 先読み秒, 先読み上限MiB)
+BUFFER_LEVELS = {
+    1: (0.5, 10, 32),
+    2: (1.0, 30, 64),
+    3: (2.0, 90, 128),
+}
+CONFIG_FILE = os.path.join(APP_DIR, 'config.json')
+
+
+def _load_config():
+    try:
+        with open(CONFIG_FILE, encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_config(cfg):
+    try:
+        os.makedirs(APP_DIR, exist_ok=True)
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(cfg, f)
+    except Exception:
+        pass
+
+
+def buffer_level():
+    lv = state.get('buffer_level')
+    return lv if lv in BUFFER_LEVELS else 2
+
+
+_mpv_opts_text = None
+_buf_logged = set()
+
+
+def _mpv_supports(opt):
+    """Does this mpv build know the option? (checked once; avoids passing unknown flags)"""
+    global _mpv_opts_text
+    if _mpv_opts_text is None:
+        try:
+            _mpv_opts_text = subprocess.run(['mpv', '--list-options'], capture_output=True,
+                                            text=True, timeout=10).stdout
+        except Exception:
+            _mpv_opts_text = ''
+    return opt in _mpv_opts_text
+
+
+def mpv_buffer_args():
+    """mpv: audio output buffer + read-ahead cache (stdin pipe and radio streams)"""
+    lv = buffer_level()
+    ab, ra, mib = BUFFER_LEVELS[lv]
+    args = [f'--audio-buffer={ab}', '--cache=yes', f'--demuxer-readahead-secs={ra}',
+            f'--demuxer-max-bytes={mib}MiB', '--demuxer-max-back-bytes=4MiB']
+    sles = _mpv_supports('--opensles-buffer-size-in-ms')
+    if sles:      # Android's OpenSL ES output buffer: the part that actually runs dry during dropouts
+        args.append(f'--opensles-buffer-size-in-ms={int(ab * 1000)}')
+    if lv not in _buf_logged:
+        _buf_logged.add(lv)
+        print(f'🛡 buffer level {lv}: audio {ab}s, read-ahead {ra}s, OpenSL ES buffer: {"yes" if sles else "n/a"}')
+    return args
+
+
+def enlarge_pipe(f, size=1 << 20):
+    """ffmpeg→mpv のパイプ容量を拡大する（既定64KB → 1MB）。ffmpeg が先に進んで余裕を作れる"""
+    try:
+        import fcntl
+        fcntl.fcntl(f.fileno(), 1031, size)      # F_SETPIPE_SZ
+    except Exception:
+        pass
+
+
 def build_html():
     radio_json = json.dumps(RADIO_STATIONS, ensure_ascii=False)
     eq_json    = json.dumps(EQ_LABELS,      ensure_ascii=False)
@@ -1386,6 +1462,15 @@ input[type=range]::-webkit-slider-thumb{{-webkit-appearance:none;width:22px;heig
   </div>
   <button class="btn-full" onclick="rescan()">📂 再スキャン実行</button>
 
+  <div class="sec" style="margin-top:24px">🛡 音飛び対策（先読みバッファ）</div>
+  <div style="background:var(--sf);border-radius:13px;padding:14px;font-size:13px;line-height:1.8;color:var(--tx2);margin-bottom:10px">
+    <div style="margin-bottom:10px">音が途切れるときは、大きくしてください。次の曲から効きます。（大きいほど、一時停止や曲送りの反応が少し遅くなります）</div>
+    <div style="display:flex;gap:8px" id="buf-btns">
+      <button class="btn-full ghost" data-lv="1" onclick="setBuffer(1)" style="flex:1;margin:0">標準</button>
+      <button class="btn-full" data-lv="2" onclick="setBuffer(2)" style="flex:1;margin:0">大</button>
+      <button class="btn-full ghost" data-lv="3" onclick="setBuffer(3)" style="flex:1;margin:0">最大</button>
+    </div>
+  </div>
   <div class="sec" style="margin-top:24px">📲 アプリとして使う</div>
   <div style="background:var(--sf);border-radius:13px;padding:14px;font-size:13px;line-height:1.8;color:var(--tx2);margin-bottom:10px">
     <div id="install-txt" style="margin-bottom:10px">ホーム画面にアイコンを追加すると、ブラウザの枠なしで<b>アプリのように</b>起動できます。</div>
@@ -1426,6 +1511,13 @@ let st        = {{}};
 let chipsReady = false;
 let coverTs    = 0;
 
+function updateBufUI(lv) {{ document.querySelectorAll('#buf-btns button').forEach(b => {{ b.className = 'btn-full' + (+b.dataset.lv === lv ? '' : ' ghost'); }}); }}
+async function setBuffer(lv) {{
+  try {{ await fetch('/api/buffer',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{level:lv}})}}); }} catch(e) {{}}
+  updateBufUI(lv);
+}}
+async function loadBuf() {{ try {{ const s=await (await fetch('/api/status')).json(); updateBufUI(s.buffer||2); }} catch(e) {{}} }}
+
 // ── アプリ化 (PWA) ──
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{{}});
 let _installEv = null;
@@ -1458,7 +1550,7 @@ function showPage(id, btn) {{
   btn.classList.add('active');
   if (id==='pg-lib'   && allTracks.length===0) doScan();
   if (id==='pg-radio' ) renderRadio();
-  if (id==='pg-set'   ) {{ fetchPresets(); fetchDirs(); document.getElementById('srv-url').textContent=location.href; initAppCard(); }}
+  if (id==='pg-set'   ) {{ fetchPresets(); fetchDirs(); document.getElementById('srv-url').textContent=location.href; initAppCard(); loadBuf(); }}
 }}
 
 // ── 時間フォーマット ──
@@ -2097,6 +2189,7 @@ class Handler(BaseHTTPRequestHandler):
                 'has_cover': has_cover,
                 'cover_ts':  cover_ts,
                 'scan':      dict(scan_progress),
+                'buffer':    buffer_level(),
             })
 
         elif p == '/api/tracks':
@@ -2159,6 +2252,18 @@ class Handler(BaseHTTPRequestHandler):
         global stop_playlist, playlist_thread
         p    = urlparse(self.path).path
         data = self._body()
+
+        # ── 先読みバッファの設定 ──
+        if p == '/api/buffer':
+            try:
+                lv = int(data.get('level', 2))
+            except Exception:
+                lv = 2
+            if lv in BUFFER_LEVELS:
+                state['buffer_level'] = lv
+                cfg = _load_config(); cfg['buffer_level'] = lv; _save_config(cfg)
+            self._json({'ok': True, 'level': buffer_level()})
+            return
 
         # ── 終了（本体からのみ。他サイトからの誤爆防止に専用ヘッダー必須）──
         if p == '/api/shutdown':
@@ -2406,6 +2511,7 @@ def main():
     except Exception:
         pass
     _setup_runtime_files()
+    state['buffer_level'] = _load_config().get('buffer_level', 2)
     print('═' * 58)
     print(f'🎵  {APP_NAME}  Android版 (Termux)')
     print('═' * 58)
