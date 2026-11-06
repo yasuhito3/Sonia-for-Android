@@ -187,8 +187,7 @@ case "${1:-open}" in
             WAS=0; is_running && WAS=1
             [ "$WAS" = 1 ] && stop_server
             mv "$TMP" "$APP"
-            echo "✅ 更新しました"
-            [ "$WAS" = 1 ] && start_server
+            echo "✅ 更新しました。起動するには  musica  と入力してください"
         else
             rm -f "$TMP"; echo "❌ 更新に失敗しました（今のバージョンはそのまま使えます）"
         fi ;;
